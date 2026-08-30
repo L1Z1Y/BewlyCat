@@ -7,7 +7,6 @@ import type { WidescreenHomeNavigationDisposition } from '~/constants/widescreen
 import ForYou from '~/contentScripts/views/Home/components/ForYou.vue'
 import { HomeSubPage } from '~/contentScripts/views/Home/types'
 import { AppPage } from '~/enums/appEnums'
-import { settings } from '~/logic'
 import type { AppVideoElement, ForYouState, VideoElement } from '~/stores/forYouStore'
 import emitter from '~/utils/mitt'
 import { openVideoWithWidescreenHomeSnapshot } from '~/utils/widescreenHomeTransfer'
@@ -89,16 +88,7 @@ function getNavigationDisposition(event: MouseEvent): WidescreenHomeNavigationDi
   if (event.shiftKey)
     return 'foreground'
 
-  switch (settings.value.videoCardLinkOpenMode) {
-    case 'currentTab':
-      return 'current'
-    case 'background':
-      return 'background'
-    case 'drawer':
-    case 'newTab':
-    default:
-      return 'foreground'
-  }
+  return 'current'
 }
 
 async function handleCardClick(item: VideoElement | AppVideoElement, event: MouseEvent) {

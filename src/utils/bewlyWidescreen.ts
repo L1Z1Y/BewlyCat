@@ -114,6 +114,7 @@ let loadingPlaybackCleanup: (() => void) | undefined
 let loadingEscapeCleanup: (() => void) | undefined
 let loadingPreparationFallbackTimer: ReturnType<typeof setTimeout> | undefined
 let loadingSuppressedUntilExit = false
+let loadingPersistentUntilLayout = false
 let switchHint: HTMLElement | null = null
 let switchHintStyleEl: HTMLStyleElement | null = null
 let switchHintTimer: ReturnType<typeof setTimeout> | undefined
@@ -927,6 +928,9 @@ function showWidescreenLoading() {
 }
 
 function dismissWidescreenLoadingForPlaying() {
+  if (loadingPersistentUntilLayout)
+    return
+
   loadingSuppressedUntilExit = true
   removeWidescreenLoading()
 }
@@ -1047,13 +1051,24 @@ function installSettingsWatchers() {
   })
 }
 
-export function prepareBewlyWidescreenLoading() {
+export function prepareBewlyWidescreenLoading(
+  options: { persistentUntilLayout?: boolean } = {},
+) {
   ensureNativePlayerModeGuard()
-  if (state || loadingSuppressedUntilExit)
+  if (state)
     return
 
+  if (options.persistentUntilLayout) {
+    loadingPersistentUntilLayout = true
+    loadingSuppressedUntilExit = false
+  }
+  else if (loadingSuppressedUntilExit) {
+    return
+  }
+
   const video = getVideoElement()
-  if (video
+  if (!loadingPersistentUntilLayout
+    && video
     && !video.paused
     && !video.ended) {
     loadingSuppressedUntilExit = true
@@ -1069,6 +1084,7 @@ export function prepareBewlyWidescreenLoading() {
   if (!loadingPreparationFallbackTimer) {
     loadingPreparationFallbackTimer = setTimeout(() => {
       loadingPreparationFallbackTimer = undefined
+      loadingPersistentUntilLayout = false
       loadingSuppressedUntilExit = true
       removeWidescreenLoading()
     }, PREPARED_LOADING_TIMEOUT)
@@ -3121,6 +3137,7 @@ function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
   setupSidebarToggleAutoHide(nextState)
   setTimeout(() => window.dispatchEvent(new Event('resize')), 0)
   removeSwitchHint()
+  loadingPersistentUntilLayout = false
   removeWidescreenLoading()
 
   return true
@@ -3167,14 +3184,20 @@ function scheduleReadyRetry(delay = READY_RETRY_INTERVAL) {
       return
 
     readyRetryCount++
-    if (readyRetryCount <= READY_RETRY_MAX)
+    if (readyRetryCount <= READY_RETRY_MAX) {
       scheduleReadyRetry()
-    else
+    }
+    else {
+      loadingPersistentUntilLayout = false
       removeWidescreenLoading()
+    }
   }, delay)
 }
 
-function startAfterPageLoad(sidebarPosition: 'left' | 'right' = 'right') {
+function startAfterPageLoad(
+  sidebarPosition: 'left' | 'right' = 'right',
+  settleDelay = LOAD_SETTLE_DELAY,
+) {
   if (state)
     return
 
@@ -3183,7 +3206,7 @@ function startAfterPageLoad(sidebarPosition: 'left' | 'right' = 'right') {
   clearLoadFallbackTimer()
   readyRetryCount = 0
   pendingSidebarPosition = sidebarPosition
-  scheduleReadyRetry(LOAD_SETTLE_DELAY)
+  scheduleReadyRetry(settleDelay)
 }
 
 function scheduleSidebarRefresh() {
@@ -3202,6 +3225,7 @@ function scheduleSidebarRefresh() {
 export function applyBewlyWidescreen(
   sidebarPosition: 'left' | 'right' = 'right',
   showLoading = true,
+  options: { eager?: boolean } = {},
 ) {
   ensureNativePlayerModeGuard()
   installSettingsWatchers()
@@ -3213,6 +3237,11 @@ export function applyBewlyWidescreen(
     const video = getVideoElement()
     if (!video || video.paused || video.ended)
       showWidescreenLoading()
+  }
+
+  if (options.eager) {
+    startAfterPageLoad(sidebarPosition, 0)
+    return
   }
 
   if (document.readyState === 'complete') {
@@ -3238,6 +3267,7 @@ export function exitBewlyWidescreen(
   clearLoadFallbackTimer()
   clearPageLoadHandler()
   loadingSuppressedUntilExit = false
+  loadingPersistentUntilLayout = false
   removeSwitchHint(true)
   removeWidescreenLoading(true)
   waitingForLoad = false

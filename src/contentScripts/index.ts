@@ -75,6 +75,15 @@ const isElectronEnv = isElectron()
 const widescreenHomeTransferToken = captureWidescreenHomeTransferToken()
 const currentUrl = document.URL
 
+if (shouldInitializeContentScript
+  && !isElectronEnv
+  && widescreenHomeTransferToken
+  && isVideoOrBangumiPage()) {
+  // 宽屏首页发起的跳转已经明确要进入 Bewly 宽屏。内容脚本运行在
+  // document_start，立即遮住原生布局，并保持到自定义布局完成接管。
+  prepareBewlyWidescreenLoading({ persistentUntilLayout: true })
+}
+
 if (shouldInitializeContentScript && isHomePage()) {
   console.log('[BewlyCat][首页加载] 插件开始加载', {
     time: new Date().toLocaleString(),
@@ -541,30 +550,32 @@ else if (shouldInitializeContentScript) {
 
     if (targetPlayerMode === 'bewlyWidescreen' && !isInFullscreen && !isInWebFullscreen) {
       // 遮罩仅覆盖视觉，不搬动 B 站 DOM；自定义播放器仍在下方等待最终顶栏稳定。
-      prepareBewlyWidescreenLoading()
+      prepareBewlyWidescreenLoading({ persistentUntilLayout: forceWidescreenHomeLaunch })
     }
     else if (!isBewlyWidescreenActive()) {
       exitBewlyWidescreen()
     }
 
-    if (document.readyState !== 'complete') {
+    if (document.readyState !== 'complete' && !forceWidescreenHomeLaunch) {
       clearPlayerModeRetry()
       return
     }
 
-    const settleDelay = playerModeReadyAfter - Date.now()
-    if (settleDelay > 0) {
-      schedulePlayerModeRetry(settleDelay)
-      return
-    }
+    if (!forceWidescreenHomeLaunch) {
+      const settleDelay = playerModeReadyAfter - Date.now()
+      if (settleDelay > 0) {
+        schedulePlayerModeRetry(settleDelay)
+        return
+      }
 
-    // 普通视频页以 UP 主头像完成图片加载和布局作为 B 站主体渲染完成信号。
-    // 番剧、活动页等可能没有该头像；普通视频异常时也在超时后继续，避免永久阻塞。
-    if (isVideoPage()
-      && Date.now() < videoOwnerAvatarReadyDeadline
-      && !isVideoOwnerAvatarReady()) {
-      schedulePlayerModeRetry()
-      return
+      // 普通视频页以 UP 主头像完成图片加载和布局作为 B 站主体渲染完成信号。
+      // 番剧、活动页等可能没有该头像；普通视频异常时也在超时后继续，避免永久阻塞。
+      if (isVideoPage()
+        && Date.now() < videoOwnerAvatarReadyDeadline
+        && !isVideoOwnerAvatarReady()) {
+        schedulePlayerModeRetry()
+        return
+      }
     }
 
     // 如果播放器已经在全屏状态，跳过应用模式（避免互动视频退出全屏）
@@ -601,6 +612,7 @@ else if (shouldInitializeContentScript) {
             settings.value.bewlyWidescreenSidebarPosition || 'right',
             // 遮罩已在等待阶段挂载，并保持到宽屏布局完成。
             false,
+            { eager: forceWidescreenHomeLaunch },
           )
           break
         case 'webFullscreen':
