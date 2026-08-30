@@ -80,7 +80,8 @@ if (shouldInitializeContentScript
   && widescreenHomeTransferToken
   && isVideoOrBangumiPage()) {
   // 宽屏首页发起的跳转已经明确要进入 Bewly 宽屏。内容脚本运行在
-  // document_start，立即遮住原生布局，并保持到自定义布局完成接管。
+  // document_start，立即遮住原生布局；若播放器先开始播放则让出画面，
+  // 否则保持到自定义布局完成接管。
   prepareBewlyWidescreenLoading({ persistentUntilLayout: true })
 }
 
@@ -228,22 +229,29 @@ else if (shouldInitializeContentScript) {
   let beforeLoadedStyleFailsafeTimer: ReturnType<typeof setTimeout> | undefined
   let lastUrl = location.href
   let lastVideoNavigationKey = getVideoNavigationKey(location.href)
+  const widescreenHomeLaunchNavigationKey = widescreenHomeTransferToken
+    ? getVideoNavigationKey(location.href)
+    : undefined
+  const useFiniteInitialPlayerReadiness = document.readyState === 'complete'
+    || !!widescreenHomeLaunchNavigationKey
   let lastAppliedPlayerModeNavigationKey: string | undefined
-  let playerModeReadyAfter = document.readyState === 'complete'
+  let playerModeReadyAfter = useFiniteInitialPlayerReadiness
     ? Date.now() + playerModeLoadSettleDelay
     : Number.POSITIVE_INFINITY
   let playerModeRetryTimer: ReturnType<typeof setTimeout> | undefined
+  let playerModeApplyPromise: Promise<boolean> | undefined
+  let playerModeApplyNavigationKey: string | undefined
   let playbackBehaviorTimer: ReturnType<typeof setTimeout> | undefined
   let playbackBehaviorScheduledForKey: string | undefined
   let playerModeSettingsReady = false
-  let videoOwnerAvatarReadyDeadline = document.readyState === 'complete'
+  let videoOwnerAvatarReadyDeadline = useFiniteInitialPlayerReadiness
     ? Date.now() + videoOwnerAvatarReadyTimeout
     : Number.POSITIVE_INFINITY
   let nativeVideoHeaderCandidate: HTMLElement | null = null
   let nativeVideoHeaderStableSince = 0
   let nativeVideoHeaderObserved = false
   let nativeVideoHeaderReplacementObserved = false
-  let nativeVideoHeaderReadyDeadline = document.readyState === 'complete'
+  let nativeVideoHeaderReadyDeadline = useFiniteInitialPlayerReadiness
     ? Date.now() + videoOwnerAvatarReadyTimeout
     : Number.POSITIVE_INFINITY
   let pendingWidescreenReloadNavigationKey: string | undefined
@@ -253,9 +261,6 @@ else if (shouldInitializeContentScript) {
   let urlChangeCheckQueued = false
   let playerModeResumeQueued = false
   let watchLaterButtonAdded = false // 标记稍后再看按钮是否已添加
-  const widescreenHomeLaunchNavigationKey = widescreenHomeTransferToken
-    ? getVideoNavigationKey(location.href)
-    : undefined
 
   // 设置水合后立即同步 i18n 语言。宽屏遮罩等轻 DOM 元素在 App 挂载前就会
   // 用 t() 渲染一次性文案，若等到 App.vue 里的语言 watcher 才切换 locale，
@@ -532,6 +537,10 @@ else if (shouldInitializeContentScript) {
     const currentNavigationKey = getVideoNavigationKey(location.href)
     if (lastAppliedPlayerModeNavigationKey === currentNavigationKey)
       return
+    if (playerModeApplyPromise
+      && playerModeApplyNavigationKey === currentNavigationKey) {
+      return
+    }
 
     const forceWidescreenHomeLaunch = Boolean(
       widescreenHomeTransferToken
@@ -607,14 +616,31 @@ else if (shouldInitializeContentScript) {
     }
     else {
       switch (targetPlayerMode) {
-        case 'bewlyWidescreen':
-          applyBewlyWidescreen(
+        case 'bewlyWidescreen': {
+          const applyPromise = applyBewlyWidescreen(
             settings.value.bewlyWidescreenSidebarPosition || 'right',
-            // 遮罩已在等待阶段挂载，并保持到宽屏布局完成。
+            // 遮罩已在等待阶段挂载；播放器先开始播放时会提前让出画面。
             false,
             { eager: forceWidescreenHomeLaunch },
           )
-          break
+          playerModeApplyPromise = applyPromise
+          playerModeApplyNavigationKey = currentNavigationKey
+          applyPlayerModeCompanionSettings()
+          autoContinuationNavigationKey = undefined
+          lastVideoEndedAt = 0
+          void applyPromise.then((applied) => {
+            if (playerModeApplyPromise !== applyPromise)
+              return
+
+            playerModeApplyPromise = undefined
+            playerModeApplyNavigationKey = undefined
+            if (!applied || getVideoNavigationKey(location.href) !== currentNavigationKey)
+              return
+
+            lastAppliedPlayerModeNavigationKey = currentNavigationKey
+          })
+          return
+        }
         case 'webFullscreen':
           webFullscreen()
           break

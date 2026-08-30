@@ -260,7 +260,7 @@ export function registerDefaultHandlers(): void {
       return
     }
 
-    applyBewlyWidescreen(settings.value.bewlyWidescreenSidebarPosition || 'right')
+    void applyBewlyWidescreen(settings.value.bewlyWidescreenSidebarPosition || 'right')
   })
 
   // 短步后退

@@ -170,7 +170,7 @@ async function handleControlClick(button: HTMLElement) {
   }, APPLY_TIMEOUT)
 
   try {
-    applyBewlyWidescreen(settings.value.bewlyWidescreenSidebarPosition || 'right', false)
+    void applyBewlyWidescreen(settings.value.bewlyWidescreenSidebarPosition || 'right', false)
   }
   catch (error) {
     console.error('[BewlyCat] 切换 Bewly 宽屏失败', error)

@@ -114,7 +114,6 @@ let loadingPlaybackCleanup: (() => void) | undefined
 let loadingEscapeCleanup: (() => void) | undefined
 let loadingPreparationFallbackTimer: ReturnType<typeof setTimeout> | undefined
 let loadingSuppressedUntilExit = false
-let loadingPersistentUntilLayout = false
 let switchHint: HTMLElement | null = null
 let switchHintStyleEl: HTMLStyleElement | null = null
 let switchHintTimer: ReturnType<typeof setTimeout> | undefined
@@ -122,6 +121,8 @@ let readyRetryTimer: ReturnType<typeof setTimeout> | undefined
 let loadFallbackTimer: ReturnType<typeof setTimeout> | undefined
 let sidebarRefreshTimer: ReturnType<typeof setTimeout> | undefined
 let pageLoadHandler: (() => void) | undefined
+let pendingApplyPromise: Promise<boolean> | undefined
+let resolvePendingApply: ((applied: boolean) => void) | undefined
 let readyRetryCount = 0
 let waitingForLoad = false
 let pendingSidebarPosition: 'left' | 'right' = 'right'
@@ -928,9 +929,6 @@ function showWidescreenLoading() {
 }
 
 function dismissWidescreenLoadingForPlaying() {
-  if (loadingPersistentUntilLayout)
-    return
-
   loadingSuppressedUntilExit = true
   removeWidescreenLoading()
 }
@@ -1059,7 +1057,6 @@ export function prepareBewlyWidescreenLoading(
     return
 
   if (options.persistentUntilLayout) {
-    loadingPersistentUntilLayout = true
     loadingSuppressedUntilExit = false
   }
   else if (loadingSuppressedUntilExit) {
@@ -1067,8 +1064,7 @@ export function prepareBewlyWidescreenLoading(
   }
 
   const video = getVideoElement()
-  if (!loadingPersistentUntilLayout
-    && video
+  if (video
     && !video.paused
     && !video.ended) {
     loadingSuppressedUntilExit = true
@@ -1084,7 +1080,6 @@ export function prepareBewlyWidescreenLoading(
   if (!loadingPreparationFallbackTimer) {
     loadingPreparationFallbackTimer = setTimeout(() => {
       loadingPreparationFallbackTimer = undefined
-      loadingPersistentUntilLayout = false
       loadingSuppressedUntilExit = true
       removeWidescreenLoading()
     }, PREPARED_LOADING_TIMEOUT)
@@ -2143,8 +2138,9 @@ function injectLayoutStyle() {
     }
 
     #${ROOT_ID} .bewly-widescreen-tabs {
-      position: relative;
-      z-index: 0;
+      position: sticky;
+      top: 0;
+      z-index: 3;
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       flex: 0 0 auto;
@@ -3137,10 +3133,17 @@ function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
   setupSidebarToggleAutoHide(nextState)
   setTimeout(() => window.dispatchEvent(new Event('resize')), 0)
   removeSwitchHint()
-  loadingPersistentUntilLayout = false
   removeWidescreenLoading()
+  settlePendingApply(true)
 
   return true
+}
+
+function settlePendingApply(applied: boolean) {
+  const resolve = resolvePendingApply
+  pendingApplyPromise = undefined
+  resolvePendingApply = undefined
+  resolve?.(applied)
 }
 
 function clearReadyRetryTimer() {
@@ -3177,8 +3180,10 @@ function scheduleReadyRetry(delay = READY_RETRY_INTERVAL) {
   readyRetryTimer = setTimeout(() => {
     readyRetryTimer = undefined
 
-    if (state)
+    if (state) {
+      settlePendingApply(true)
       return
+    }
 
     if (isReadyForLayout() && applyNow(pendingSidebarPosition))
       return
@@ -3188,8 +3193,9 @@ function scheduleReadyRetry(delay = READY_RETRY_INTERVAL) {
       scheduleReadyRetry()
     }
     else {
-      loadingPersistentUntilLayout = false
+      loadingSuppressedUntilExit = true
       removeWidescreenLoading()
+      settlePendingApply(false)
     }
   }, delay)
 }
@@ -3198,8 +3204,10 @@ function startAfterPageLoad(
   sidebarPosition: 'left' | 'right' = 'right',
   settleDelay = LOAD_SETTLE_DELAY,
 ) {
-  if (state)
+  if (state) {
+    settlePendingApply(true)
     return
+  }
 
   waitingForLoad = false
   clearPageLoadHandler()
@@ -3226,11 +3234,18 @@ export function applyBewlyWidescreen(
   sidebarPosition: 'left' | 'right' = 'right',
   showLoading = true,
   options: { eager?: boolean } = {},
-) {
+): Promise<boolean> {
   ensureNativePlayerModeGuard()
   installSettingsWatchers()
-  if (state || waitingForLoad || readyRetryTimer)
-    return
+  if (state)
+    return Promise.resolve(true)
+  if (pendingApplyPromise)
+    return pendingApplyPromise
+
+  pendingApplyPromise = new Promise<boolean>((resolve) => {
+    resolvePendingApply = resolve
+  })
+  const applyResult = pendingApplyPromise
 
   pendingSidebarPosition = sidebarPosition
   if (showLoading) {
@@ -3241,12 +3256,12 @@ export function applyBewlyWidescreen(
 
   if (options.eager) {
     startAfterPageLoad(sidebarPosition, 0)
-    return
+    return applyResult
   }
 
   if (document.readyState === 'complete') {
     startAfterPageLoad(sidebarPosition)
-    return
+    return applyResult
   }
 
   waitingForLoad = true
@@ -3258,6 +3273,8 @@ export function applyBewlyWidescreen(
     if (waitingForLoad)
       startAfterPageLoad(pendingSidebarPosition)
   }, 6000)
+
+  return applyResult
 }
 
 export function exitBewlyWidescreen(
@@ -3267,10 +3284,10 @@ export function exitBewlyWidescreen(
   clearLoadFallbackTimer()
   clearPageLoadHandler()
   loadingSuppressedUntilExit = false
-  loadingPersistentUntilLayout = false
   removeSwitchHint(true)
   removeWidescreenLoading(true)
   waitingForLoad = false
+  settlePendingApply(false)
 
   if (options.userInitiated)
     window.dispatchEvent(new Event(BEWLY_WIDESCREEN_USER_EXIT))
