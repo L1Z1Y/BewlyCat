@@ -14,6 +14,7 @@ function t(key: string, params: Record<string, unknown> = {}) {
 
 type BewlyWidescreenTab = 'comment' | 'danmaku' | 'playlist' | 'home'
 type BewlyWidescreenSidebarMode = 'fit' | 'narrow'
+type BewlyWidescreenPhase = 'preparing' | 'active'
 
 interface MovedNode {
   node: HTMLElement
@@ -26,9 +27,11 @@ interface WidescreenHomeMount {
 }
 
 interface BewlyWidescreenState {
+  phase: BewlyWidescreenPhase
   root: HTMLElement
   playerSlot: HTMLElement
   playerFrame: HTMLElement
+  playerPlaceholder: HTMLElement
   danmakuDock: HTMLElement
   sidebarEl: HTMLElement
   sidebarTop: HTMLElement
@@ -114,6 +117,8 @@ let loadingPlaybackCleanup: (() => void) | undefined
 let loadingEscapeCleanup: (() => void) | undefined
 let loadingPreparationFallbackTimer: ReturnType<typeof setTimeout> | undefined
 let loadingSuppressedUntilExit = false
+let loadingPersistentUntilShell = false
+let loadingVisibilityCleanup: (() => void) | undefined
 let switchHint: HTMLElement | null = null
 let switchHintStyleEl: HTMLStyleElement | null = null
 let switchHintTimer: ReturnType<typeof setTimeout> | undefined
@@ -929,11 +934,65 @@ function showWidescreenLoading() {
 }
 
 function dismissWidescreenLoadingForPlaying() {
+  if (loadingPersistentUntilShell)
+    return
+
   loadingSuppressedUntilExit = true
   removeWidescreenLoading()
 }
 
+function clearLoadingPreparationFallbackTimer() {
+  if (!loadingPreparationFallbackTimer)
+    return
+
+  clearTimeout(loadingPreparationFallbackTimer)
+  loadingPreparationFallbackTimer = undefined
+}
+
+function clearLoadingVisibilityListener() {
+  loadingVisibilityCleanup?.()
+  loadingVisibilityCleanup = undefined
+}
+
+function scheduleLoadingPreparationFallback() {
+  if (loadingPreparationFallbackTimer)
+    return
+  if (!loadingOverlay)
+    return
+  if (loadingPersistentUntilShell && document.visibilityState !== 'visible')
+    return
+
+  loadingPreparationFallbackTimer = setTimeout(() => {
+    loadingPreparationFallbackTimer = undefined
+    loadingPersistentUntilShell = false
+    loadingSuppressedUntilExit = true
+    removeWidescreenLoading()
+  }, PREPARED_LOADING_TIMEOUT)
+}
+
+function ensurePersistentLoadingVisibilityListener() {
+  if (loadingVisibilityCleanup)
+    return
+
+  const handleVisibilityChange = () => {
+    if (!loadingPersistentUntilShell)
+      return
+
+    if (document.visibilityState !== 'visible') {
+      clearLoadingPreparationFallbackTimer()
+      return
+    }
+
+    showWidescreenLoading()
+    scheduleLoadingPreparationFallback()
+  }
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  loadingVisibilityCleanup = () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+}
+
 function removeWidescreenLoading(immediate = false) {
+  loadingPersistentUntilShell = false
+  clearLoadingVisibilityListener()
   loadingPlaybackCleanup?.()
   loadingEscapeCleanup?.()
   loadingLocaleWatchStop?.()
@@ -944,10 +1003,7 @@ function removeWidescreenLoading(immediate = false) {
     loadingExitButtonTimer = undefined
   }
 
-  if (loadingPreparationFallbackTimer) {
-    clearTimeout(loadingPreparationFallbackTimer)
-    loadingPreparationFallbackTimer = undefined
-  }
+  clearLoadingPreparationFallbackTimer()
 
   if (loadingFadeTimer) {
     clearTimeout(loadingFadeTimer)
@@ -1050,13 +1106,14 @@ function installSettingsWatchers() {
 }
 
 export function prepareBewlyWidescreenLoading(
-  options: { persistentUntilLayout?: boolean } = {},
+  options: { persistentUntilShell?: boolean } = {},
 ) {
   ensureNativePlayerModeGuard()
   if (state)
     return
 
-  if (options.persistentUntilLayout) {
+  if (options.persistentUntilShell) {
+    loadingPersistentUntilShell = true
     loadingSuppressedUntilExit = false
   }
   else if (loadingSuppressedUntilExit) {
@@ -1064,7 +1121,8 @@ export function prepareBewlyWidescreenLoading(
   }
 
   const video = getVideoElement()
-  if (video
+  if (!loadingPersistentUntilShell
+    && video
     && !video.paused
     && !video.ended) {
     loadingSuppressedUntilExit = true
@@ -1077,19 +1135,38 @@ export function prepareBewlyWidescreenLoading(
   if (!loadingOverlay)
     return
 
-  if (!loadingPreparationFallbackTimer) {
-    loadingPreparationFallbackTimer = setTimeout(() => {
-      loadingPreparationFallbackTimer = undefined
-      loadingSuppressedUntilExit = true
-      removeWidescreenLoading()
-    }, PREPARED_LOADING_TIMEOUT)
+  if (loadingPersistentUntilShell)
+    ensurePersistentLoadingVisibilityListener()
+  scheduleLoadingPreparationFallback()
+}
+
+function createPlayerPlaceholder() {
+  const placeholder = document.createElement('div')
+  placeholder.className = 'bewly-widescreen-player-placeholder'
+  placeholder.setAttribute('role', 'status')
+  placeholder.setAttribute('aria-live', 'polite')
+
+  const loadingGifUrl = getLoadingGifUrl()
+  if (loadingGifUrl) {
+    const icon = document.createElement('img')
+    icon.className = 'bewly-widescreen-player-placeholder__icon'
+    icon.src = loadingGifUrl
+    icon.alt = ''
+    icon.setAttribute('aria-hidden', 'true')
+    placeholder.appendChild(icon)
   }
+
+  const label = document.createElement('span')
+  label.textContent = t('widescreen.loading')
+  placeholder.appendChild(label)
+  return placeholder
 }
 
 function createRoot(sidebarPosition: 'left' | 'right' = 'right') {
   const root = document.createElement('div')
   root.id = ROOT_ID
   root.dataset.sidebarPosition = sidebarPosition
+  root.dataset.phase = 'preparing'
 
   const stage = document.createElement('div')
   stage.className = 'bewly-widescreen-stage'
@@ -1098,6 +1175,8 @@ function createRoot(sidebarPosition: 'left' | 'right' = 'right') {
   playerSlot.className = 'bewly-widescreen-player-slot'
   const playerFrame = document.createElement('div')
   playerFrame.className = 'bewly-widescreen-player-frame'
+  const playerPlaceholder = createPlayerPlaceholder()
+  playerFrame.appendChild(playerPlaceholder)
   const danmakuDock = document.createElement('div')
   danmakuDock.className = 'bewly-widescreen-danmaku-dock'
   const sidebarToggleButton = createSidebarToggleButton()
@@ -1154,9 +1233,8 @@ function createRoot(sidebarPosition: 'left' | 'right' = 'right') {
   else
     stage.append(playerSlot, sidebar)
   root.appendChild(stage)
-  document.body.appendChild(root)
 
-  return { root, playerSlot, playerFrame, danmakuDock, sidebarEl: sidebar, sidebarTop, infoSlot, upSlot, toolbarSlot, descriptionSlot, tagsSlot, panels, tabButtons, sidebarToggleButton }
+  return { root, playerSlot, playerFrame, playerPlaceholder, danmakuDock, sidebarEl: sidebar, sidebarTop, infoSlot, upSlot, toolbarSlot, descriptionSlot, tagsSlot, panels, tabButtons, sidebarToggleButton }
 }
 
 function injectLayoutStyle() {
@@ -1264,6 +1342,7 @@ function injectLayoutStyle() {
     }
 
     #${ROOT_ID} .bewly-widescreen-player-frame {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -1283,6 +1362,34 @@ function injectLayoutStyle() {
       aspect-ratio: auto !important;
       margin: 0 !important;
       flex: 0 1 auto;
+    }
+
+    #${ROOT_ID} .bewly-widescreen-player-frame > .bewly-widescreen-player-placeholder {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      display: flex;
+      width: 100% !important;
+      max-width: none !important;
+      height: 100% !important;
+      max-height: none !important;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: var(--bew-space-3, 12px);
+      margin: 0 !important;
+      color: #c9ccd0;
+      background: #050609;
+      font-size: var(--bew-font-size-control, 13px);
+      font-weight: var(--bew-font-weight-medium, 500);
+      line-height: var(--bew-line-height-control, 18px);
+    }
+
+    #${ROOT_ID} .bewly-widescreen-player-placeholder__icon {
+      width: 36px;
+      height: 36px;
+      flex: 0 0 auto;
+      object-fit: contain;
     }
 
     #${ROOT_ID} .bewly-widescreen-danmaku-dock {
@@ -3071,19 +3178,21 @@ function isReadyForLayout() {
     && ((customVideo.readyState ?? 0) >= HTMLMediaElement.HAVE_CURRENT_DATA || !!customVideo.currentSrc)
 }
 
-function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
-  const player = findMovable(selectors.player)
-  if (!player)
-    return false
+function createWidescreenState(sidebarPosition: 'left' | 'right' = 'right') {
+  if (!document.body)
+    return null
 
-  const { root, playerSlot, playerFrame, danmakuDock, sidebarEl, sidebarTop, infoSlot, upSlot, toolbarSlot, descriptionSlot, tagsSlot, panels, tabButtons, sidebarToggleButton } = createRoot(sidebarPosition)
+  const { root, playerSlot, playerFrame, playerPlaceholder, danmakuDock, sidebarEl, sidebarTop, infoSlot, upSlot, toolbarSlot, descriptionSlot, tagsSlot, panels, tabButtons, sidebarToggleButton } = createRoot(sidebarPosition)
+  // 样式必须先于根节点进入文档，避免骨架挂载时出现未排版的一帧。
   const styleEl = injectLayoutStyle()
   const movedNodes: MovedNode[] = []
 
   const nextState: BewlyWidescreenState = {
+    phase: 'preparing',
     root,
     playerSlot,
     playerFrame,
+    playerPlaceholder,
     danmakuDock,
     sidebarEl,
     sidebarTop,
@@ -3106,6 +3215,7 @@ function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
 
   state = nextState
   document.body.classList.add(BODY_CLASS)
+  document.body.appendChild(root)
 
   const handleEscapeKey = (event: KeyboardEvent) => {
     if (event.key !== 'Escape')
@@ -3123,14 +3233,58 @@ function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
   nextState.escapeKeyCleanup = () => document.removeEventListener('keydown', handleEscapeKey, true)
 
   setSidebarMode(settings.value.bewlyWidescreenSidebarPriority === 'sidebar' ? 'narrow' : 'fit')
-
-  moveNode(player, playerFrame, movedNodes)
-  fillSidebar(nextState)
   setActiveTab('home')
-  setupAspectObservers(nextState)
-  setupDomRefreshObserver(nextState)
   setupSidebarInteractionTracking(nextState)
   setupSidebarToggleAutoHide(nextState)
+  removeSwitchHint()
+
+  // 启动遮罩覆盖到骨架完成首轮布局为止；下一帧只会露出已经带样式的
+  // Bewly 宽屏外壳，不会短暂显示 B 站默认布局。
+  requestAnimationFrame(() => {
+    if (state !== nextState || !root.isConnected)
+      return
+
+    void root.offsetHeight
+    removeWidescreenLoading()
+  })
+
+  return nextState
+}
+
+export function prepareBewlyWidescreenShell(
+  sidebarPosition: 'left' | 'right' = 'right',
+) {
+  ensureNativePlayerModeGuard()
+  installSettingsWatchers()
+  if (state)
+    return true
+
+  return !!createWidescreenState(sidebarPosition)
+}
+
+function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
+  const player = findMovable(selectors.player)
+  if (!player)
+    return false
+
+  const currentState = state ?? createWidescreenState(sidebarPosition)
+  if (!currentState)
+    return false
+  if (currentState.phase === 'active') {
+    settlePendingApply(true)
+    return true
+  }
+
+  if (!moveNode(player, currentState.playerFrame, currentState.movedNodes))
+    return false
+
+  currentState.phase = 'active'
+  currentState.root.dataset.phase = 'active'
+  currentState.playerPlaceholder.remove()
+  fillSidebar(currentState)
+  setActiveTab('home')
+  setupAspectObservers(currentState)
+  setupDomRefreshObserver(currentState)
   setTimeout(() => window.dispatchEvent(new Event('resize')), 0)
   removeSwitchHint()
   removeWidescreenLoading()
@@ -3180,7 +3334,7 @@ function scheduleReadyRetry(delay = READY_RETRY_INTERVAL) {
   readyRetryTimer = setTimeout(() => {
     readyRetryTimer = undefined
 
-    if (state) {
+    if (state?.phase === 'active') {
       settlePendingApply(true)
       return
     }
@@ -3195,6 +3349,11 @@ function scheduleReadyRetry(delay = READY_RETRY_INTERVAL) {
     else {
       loadingSuppressedUntilExit = true
       removeWidescreenLoading()
+      if (state?.phase === 'preparing') {
+        const preparedState = state
+        state = null
+        cleanupState(preparedState)
+      }
       settlePendingApply(false)
     }
   }, delay)
@@ -3204,7 +3363,7 @@ function startAfterPageLoad(
   sidebarPosition: 'left' | 'right' = 'right',
   settleDelay = LOAD_SETTLE_DELAY,
 ) {
-  if (state) {
+  if (state?.phase === 'active') {
     settlePendingApply(true)
     return
   }
@@ -3237,7 +3396,7 @@ export function applyBewlyWidescreen(
 ): Promise<boolean> {
   ensureNativePlayerModeGuard()
   installSettingsWatchers()
-  if (state)
+  if (state?.phase === 'active')
     return Promise.resolve(true)
   if (pendingApplyPromise)
     return pendingApplyPromise
@@ -3284,6 +3443,7 @@ export function exitBewlyWidescreen(
   clearLoadFallbackTimer()
   clearPageLoadHandler()
   loadingSuppressedUntilExit = false
+  loadingPersistentUntilShell = false
   removeSwitchHint(true)
   removeWidescreenLoading(true)
   waitingForLoad = false
@@ -3301,5 +3461,5 @@ export function exitBewlyWidescreen(
 }
 
 export function isBewlyWidescreenActive() {
-  return !!state
+  return state?.phase === 'active'
 }

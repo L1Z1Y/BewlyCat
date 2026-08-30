@@ -11,7 +11,7 @@ import { setupApp } from '~/logic/common-setup'
 import { useTopBarStore } from '~/stores/topBarStore'
 import RESET_BEWLY_CSS from '~/styles/reset.css?raw'
 import api from '~/utils/api'
-import { applyBewlyWidescreen, BEWLY_WIDESCREEN_USER_EXIT, exitBewlyWidescreen, isBewlyWidescreenActive, isBewlyWidescreenEngaged, prepareBewlyWidescreenLoading } from '~/utils/bewlyWidescreen'
+import { applyBewlyWidescreen, BEWLY_WIDESCREEN_USER_EXIT, exitBewlyWidescreen, isBewlyWidescreenActive, isBewlyWidescreenEngaged, prepareBewlyWidescreenLoading, prepareBewlyWidescreenShell } from '~/utils/bewlyWidescreen'
 import { cleanupBilibiliScripts } from '~/utils/bilibiliScriptCleanup'
 import { captureOriginalBilibiliTopBar, ensureOriginalBilibiliTopBarAppended, resetBilibiliTopBarInlineStyles, setupLoginButtonClickHandlers, shouldShowOriginalBilibiliTopBar } from '~/utils/bilibiliTopBar'
 import { findLeafActiveElement } from '~/utils/element'
@@ -80,9 +80,8 @@ if (shouldInitializeContentScript
   && widescreenHomeTransferToken
   && isVideoOrBangumiPage()) {
   // 宽屏首页发起的跳转已经明确要进入 Bewly 宽屏。内容脚本运行在
-  // document_start，立即遮住原生布局；若播放器先开始播放则让出画面，
-  // 否则保持到自定义布局完成接管。
-  prepareBewlyWidescreenLoading({ persistentUntilLayout: true })
+  // document_start，立即遮住原生布局，并保持到宽屏骨架完成首轮布局。
+  prepareBewlyWidescreenLoading({ persistentUntilShell: true })
 }
 
 if (shouldInitializeContentScript && isHomePage()) {
@@ -556,10 +555,16 @@ else if (shouldInitializeContentScript) {
     const isInFullscreen = !!(document.fullscreenElement || (document as any).webkitFullscreenElement)
     const webFullscreenBtn = document.querySelector('.bpx-player-ctrl-web,.bilibili-player-video-web-fullscreen') as HTMLElement
     const isInWebFullscreen = webFullscreenBtn?.classList.contains('bpx-state-entered')
+    const sidebarPosition = settings.value.bewlyWidescreenSidebarPosition || 'right'
 
     if (targetPlayerMode === 'bewlyWidescreen' && !isInFullscreen && !isInWebFullscreen) {
-      // 遮罩仅覆盖视觉，不搬动 B 站 DOM；自定义播放器仍在下方等待最终顶栏稳定。
-      prepareBewlyWidescreenLoading({ persistentUntilLayout: forceWidescreenHomeLaunch })
+      // 宽屏首页跳转先显示不搬动 B 站 DOM 的宽屏骨架；真实播放器仍在
+      // 下方等待原生顶栏稳定，完成后再接入骨架。
+      prepareBewlyWidescreenLoading({ persistentUntilShell: forceWidescreenHomeLaunch })
+      if (forceWidescreenHomeLaunch && !prepareBewlyWidescreenShell(sidebarPosition)) {
+        schedulePlayerModeRetry()
+        return
+      }
     }
     else if (!isBewlyWidescreenActive()) {
       exitBewlyWidescreen()
@@ -618,8 +623,8 @@ else if (shouldInitializeContentScript) {
       switch (targetPlayerMode) {
         case 'bewlyWidescreen': {
           const applyPromise = applyBewlyWidescreen(
-            settings.value.bewlyWidescreenSidebarPosition || 'right',
-            // 遮罩已在等待阶段挂载；播放器先开始播放时会提前让出画面。
+            sidebarPosition,
+            // 首页跳转已显示宽屏骨架；普通入口继续沿用原有加载行为。
             false,
             { eager: forceWidescreenHomeLaunch },
           )
@@ -1161,6 +1166,20 @@ else if (shouldInitializeContentScript) {
     }, true)
   }
   function restoreDefaultPlayerModeAfterPageResume() {
+    const resumeNavigationKey = getVideoNavigationKey(location.href)
+    const isWidescreenHomeLaunch = Boolean(
+      widescreenHomeTransferToken
+      && widescreenHomeLaunchNavigationKey
+      && resumeNavigationKey === widescreenHomeLaunchNavigationKey,
+    )
+    if (document.visibilityState === 'visible'
+      && isWidescreenHomeLaunch
+      && !isBewlyWidescreenEngaged()) {
+      // 后台标签可能长时间不参与渲染；切回前台时先恢复启动遮罩，
+      // 再继续设置水合与宽屏骨架准备，避免首帧露出原生页面。
+      prepareBewlyWidescreenLoading({ persistentUntilShell: true })
+    }
+
     if (document.visibilityState !== 'visible'
       || !isVideoOrBangumiPage()
       || playerModeResumeQueued) {
