@@ -3,16 +3,24 @@ import type { BewlyAppProvider, SettingsNavigationTarget } from '~/composables/u
 import { DrawerType, UndoForwardState } from '~/composables/useAppProvider'
 import { useDark } from '~/composables/useDark'
 import { OVERLAY_SCROLL_BAR_SCROLL } from '~/constants/globalEvents'
+import type { WidescreenHomeNavigationDisposition } from '~/constants/widescreenHomeTransfer'
 import ForYou from '~/contentScripts/views/Home/components/ForYou.vue'
 import { HomeSubPage } from '~/contentScripts/views/Home/types'
 import { AppPage } from '~/enums/appEnums'
-import type { AppVideoElement, VideoElement } from '~/stores/forYouStore'
+import { settings } from '~/logic'
+import type { AppVideoElement, ForYouState, VideoElement } from '~/stores/forYouStore'
 import emitter from '~/utils/mitt'
+import { openVideoWithWidescreenHomeSnapshot } from '~/utils/widescreenHomeTransfer'
 
 const props = defineProps<{
   scrollViewport: HTMLElement
   teleportTarget: HTMLElement
+  initialState?: ForYouState
 }>()
+
+interface ForYouExposed {
+  captureState: () => ForYouState
+}
 
 const { isDark } = useDark()
 const activatedPage = ref<AppPage>(AppPage.Home)
@@ -32,6 +40,7 @@ const handleForwardRefresh = ref<(() => void) | undefined>()
 const undoForwardState = ref(UndoForwardState.Hidden)
 const activeDrawer = ref<DrawerType>(DrawerType.None)
 const pendingSettingsNavigation = ref<SettingsNavigationTarget>()
+const forYouRef = shallowRef<ForYouExposed>()
 
 function handleSidebarScroll() {
   const nextScrollTop = props.scrollViewport.scrollTop
@@ -74,17 +83,36 @@ function navigateToVideo(url: string) {
     window.location.assign(url)
 }
 
-function handleCardClick(item: VideoElement | AppVideoElement, event: MouseEvent) {
+function getNavigationDisposition(event: MouseEvent): WidescreenHomeNavigationDisposition {
+  if (event.ctrlKey || event.metaKey)
+    return 'background'
+  if (event.shiftKey)
+    return 'foreground'
+
+  switch (settings.value.videoCardLinkOpenMode) {
+    case 'currentTab':
+      return 'current'
+    case 'background':
+      return 'background'
+    case 'drawer':
+    case 'newTab':
+    default:
+      return 'foreground'
+  }
+}
+
+async function handleCardClick(item: VideoElement | AppVideoElement, event: MouseEvent) {
   const url = getVideoUrl(item, event)
   if (!url)
     return
 
-  if (event.ctrlKey || event.metaKey) {
-    window.open(url, '_blank', 'noopener')
+  const snapshot = forYouRef.value?.captureState()
+  if (!snapshot) {
+    navigateToVideo(url)
     return
   }
 
-  navigateToVideo(url)
+  await openVideoWithWidescreenHomeSnapshot(url, snapshot, getNavigationDisposition(event))
 }
 
 function openSettings(_target?: SettingsNavigationTarget) {
@@ -130,7 +158,12 @@ onUnmounted(() => {
 
 <template>
   <div class="widescreen-for-you" :class="{ dark: isDark }">
-    <ForYou grid-layout="oneColumn" :card-click-handler="handleCardClick" />
+    <ForYou
+      ref="forYouRef"
+      grid-layout="oneColumn"
+      :initial-state="initialState"
+      :card-click-handler="handleCardClick"
+    />
   </div>
 </template>
 

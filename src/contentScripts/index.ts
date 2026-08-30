@@ -32,6 +32,7 @@ import { openLinkInBackground } from '~/utils/tabs'
 import { initVerticalVideoZoom, resetVerticalVideoZoom } from '~/utils/verticalVideoZoom'
 import { recordVideoVisitFromUrl } from '~/utils/videoVisitHistory'
 import { ensureResponsiveViewport } from '~/utils/viewportMeta'
+import { captureWidescreenHomeTransferToken } from '~/utils/widescreenHomeTransfer'
 
 import { version } from '../../package.json'
 import { initBewlyWidescreenControl } from './bewlyWidescreenControl'
@@ -71,6 +72,7 @@ if (shouldInitializeContentScript) {
 const isFirefox: boolean = /Firefox/i.test(navigator.userAgent)
 const isElectronEnv = isElectron()
 
+const widescreenHomeTransferToken = captureWidescreenHomeTransferToken()
 const currentUrl = document.URL
 
 if (shouldInitializeContentScript && isHomePage()) {
@@ -242,6 +244,9 @@ else if (shouldInitializeContentScript) {
   let urlChangeCheckQueued = false
   let playerModeResumeQueued = false
   let watchLaterButtonAdded = false // 标记稍后再看按钮是否已添加
+  const widescreenHomeLaunchNavigationKey = widescreenHomeTransferToken
+    ? getVideoNavigationKey(location.href)
+    : undefined
 
   // 设置水合后立即同步 i18n 语言。宽屏遮罩等轻 DOM 元素在 App 挂载前就会
   // 用 t() 渲染一次性文案，若等到 App.vue 里的语言 watcher 才切换 locale，
@@ -519,7 +524,14 @@ else if (shouldInitializeContentScript) {
     if (lastAppliedPlayerModeNavigationKey === currentNavigationKey)
       return
 
-    let targetPlayerMode = resolveDefaultVideoPlayerMode()
+    const forceWidescreenHomeLaunch = Boolean(
+      widescreenHomeTransferToken
+      && widescreenHomeLaunchNavigationKey
+      && currentNavigationKey === widescreenHomeLaunchNavigationKey,
+    )
+    let targetPlayerMode = forceWidescreenHomeLaunch
+      ? 'bewlyWidescreen' as const
+      : resolveDefaultVideoPlayerMode()
     if (isFestivalPage() && targetPlayerMode === 'bewlyWidescreen')
       targetPlayerMode = 'widescreen'
 

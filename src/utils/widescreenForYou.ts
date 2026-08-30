@@ -4,6 +4,7 @@ import browser from 'webextension-polyfill'
 import WidescreenForYou from '~/contentScripts/views/Home/components/WidescreenForYou.vue'
 import { setupApp } from '~/logic/common-setup'
 import RESET_BEWLY_CSS from '~/styles/reset.css?raw'
+import { takeCapturedWidescreenHomeSnapshot } from '~/utils/widescreenHomeTransfer'
 
 const MIRRORED_HOST_CLASSES = [
   'dark',
@@ -124,6 +125,7 @@ export async function mountWidescreenForYou(
   scrollViewport: HTMLElement,
   options: MountOptions,
 ): Promise<WidescreenForYouMount> {
+  const initialState = await takeCapturedWidescreenHomeSnapshot()
   const shadowRoot = panel.shadowRoot ?? panel.attachShadow({ mode: 'open' })
   const stopMirroringTheme = mirrorThemeClasses(panel)
   const statusStyle = createStatusStyle()
@@ -156,6 +158,7 @@ export async function mountWidescreenForYou(
   const app = createApp(WidescreenForYou, {
     scrollViewport,
     teleportTarget: mountTarget,
+    initialState,
   })
 
   try {

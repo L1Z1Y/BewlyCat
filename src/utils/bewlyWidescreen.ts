@@ -1114,21 +1114,21 @@ function createRoot(sidebarPosition: 'left' | 'right' = 'right') {
   tablist.setAttribute('role', 'tablist')
 
   const tabButtons = {
+    home: createTabButton('home', t('widescreen.home')),
     comment: createTabButton('comment', t('widescreen.comments')),
     danmaku: createTabButton('danmaku', t('widescreen.danmaku')),
     playlist: createTabButton('playlist', t('widescreen.episodes')),
-    home: createTabButton('home', t('widescreen.home')),
   }
-  tablist.append(tabButtons.comment, tabButtons.danmaku, tabButtons.playlist, tabButtons.home)
+  tablist.append(tabButtons.home, tabButtons.comment, tabButtons.danmaku, tabButtons.playlist)
 
   const panelWrap = document.createElement('div')
   panelWrap.className = 'bewly-widescreen-panels'
 
   const panels = {
+    home: document.createElement('section'),
     comment: document.createElement('section'),
     danmaku: document.createElement('section'),
     playlist: document.createElement('section'),
-    home: document.createElement('section'),
   }
 
   for (const [tab, panel] of Object.entries(panels) as Array<[BewlyWidescreenTab, HTMLElement]>) {
@@ -3085,7 +3085,7 @@ function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
     sidebarToggleButton,
     movedNodes,
     styleEl,
-    activeTab: 'comment',
+    activeTab: 'home',
     sidebarMode: 'fit',
     sidebarPosition,
     homeMountGeneration: 0,
@@ -3114,7 +3114,7 @@ function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
 
   moveNode(player, playerFrame, movedNodes)
   fillSidebar(nextState)
-  setActiveTab('comment')
+  setActiveTab('home')
   setupAspectObservers(nextState)
   setupDomRefreshObserver(nextState)
   setupSidebarInteractionTracking(nextState)

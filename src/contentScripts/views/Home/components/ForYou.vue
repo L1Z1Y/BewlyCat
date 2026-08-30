@@ -13,7 +13,7 @@ import { appAuthTokens, noCookieForYouRecommendationState, settings } from '~/lo
 import type { AppForYouResult, Item as AppVideoItem } from '~/models/video/appForYou'
 import { Type as ThreePointV2Type } from '~/models/video/appForYou'
 import type { forYouResult, Item as VideoItem } from '~/models/video/forYou'
-import type { AppVideoElement, VideoCardDisplayData, VideoElement } from '~/stores/forYouStore'
+import type { AppVideoElement, ForYouState, VideoCardDisplayData, VideoElement } from '~/stores/forYouStore'
 import { useForYouStore } from '~/stores/forYouStore'
 import api from '~/utils/api'
 import { ensureFreshAppAccessToken, TVAppKey } from '~/utils/authProvider'
@@ -22,9 +22,10 @@ import { decodeHtmlEntities } from '~/utils/htmlDecode'
 import { getCookie } from '~/utils/main'
 import { isVerticalVideo } from '~/utils/uriParse'
 
-const { gridLayout, cardClickHandler } = defineProps<{
+const { gridLayout, cardClickHandler, initialState } = defineProps<{
   gridLayout: GridLayoutType
   cardClickHandler?: (item: VideoElement | AppVideoElement, event: MouseEvent) => void
+  initialState?: ForYouState
 }>()
 
 const emit = defineEmits<{
@@ -325,80 +326,104 @@ function clearInitTimers() {
   initTimers.clear()
 }
 
-onMounted(() => {
-  const preservedModeHasItems = settings.value.recommendationMode === 'app'
-    ? forYouStore.state.appVideoList.length > 0
-    : forYouStore.state.videoList.length > 0
+function createCompleteState(): ForYouState {
+  return {
+    videoList: [...videoList.value],
+    appVideoList: [...appVideoList.value],
+    refreshIdx: refreshIdx.value,
+    webFreshIdx1h: webFreshIdx1h.value,
+    webFreshIdx1hTimestamp,
+    webFetchRow: webFetchRow.value,
+    webRefreshBrush: webRefreshBrush.value,
+    webLoadMoreBrush: webLoadMoreBrush.value,
+    webUniqId: webRecommendationUniqId,
+    webShowlistGroups: [...webShowlistGroups.value],
+    webLastClicklist: [...webLastClicklist.value],
+    noMoreContent: noMoreContent.value,
+    isInitialized: hasInitializedData.value || currentVideoList.value.length > 0,
+    recommendationMode: settings.value.recommendationMode,
+    scrollTop: scrollViewportRef.value?.scrollTop || 0,
+  }
+}
 
-  // 如果启用状态保留且store中有数据，则恢复状态
-  if (
-    settings.value.preserveForYouState
-    && forYouStore.state.isInitialized
-    && forYouStore.state.recommendationMode === settings.value.recommendationMode
-    && preservedModeHasItems
-  ) {
-    // 恢复关键状态
-    const savedState = forYouStore.getCompleteState()
-    videoList.value = [...savedState.videoList]
-    appVideoList.value = [...savedState.appVideoList]
-    refreshIdx.value = savedState.refreshIdx
-    webFreshIdx1h.value = savedState.webFreshIdx1h ?? 1
-    webFreshIdx1hTimestamp = savedState.webFreshIdx1hTimestamp ?? Date.now()
-    webFetchRow.value = savedState.webFetchRow ?? 1
-    webRefreshBrush.value = savedState.webRefreshBrush ?? 0
-    webLoadMoreBrush.value = savedState.webLoadMoreBrush ?? 1
-    webRecommendationUniqId = savedState.webUniqId || createWebRecommendationUniqId()
-    webLastClicklist.value = savedState.webLastClicklist?.slice(-WEB_LAST_CLICKLIST_MAX_ITEMS) || []
-    noMoreContent.value = savedState.noMoreContent
-    if (savedState.webShowlistGroups?.length)
-      webShowlistGroups.value = savedState.webShowlistGroups.filter(Boolean).slice(-1)
-    else
-      rebuildShowlistGroupsFromList(videoList.value)
-    hasInitializedData.value = true
-    isLoading.value = false
+function captureState(): ForYouState {
+  return JSON.parse(JSON.stringify(createCompleteState())) as ForYouState
+}
 
-    // Store 只负责跨卸载恢复。数据已交还给当前组件后立即释放快照，
-    // 避免 KeepAlive 中的活动列表与 Pinia 同时各持有一整份推荐数据。
-    forYouStore.resetState()
+function canRestoreState(savedState: ForYouState | undefined): savedState is ForYouState {
+  if (!savedState?.isInitialized || savedState.recommendationMode !== settings.value.recommendationMode)
+    return false
 
-    // 确保撤销按钮不显示（因为这是状态恢复，不是刷新操作）
-    hasBackState.value = false
-    hasForwardState.value = false
-    undoForwardState.value = UndoForwardState.Hidden
+  return settings.value.recommendationMode === 'app'
+    ? savedState.appVideoList.length > 0
+    : savedState.videoList.length > 0
+}
 
-    // 清空所有缓存状态，确保没有历史数据影响
-    cachedVideoList.value = []
-    cachedRefreshIdx.value = 1
-    cachedWebFetchRow.value = 1
-    cachedWebFreshIdx1h.value = 1
-    cachedWebRefreshBrush.value = 0
-    cachedWebLoadMoreBrush.value = 1
-    forwardVideoList.value = []
-    forwardRefreshIdx.value = 1
-    forwardWebFetchRow.value = 1
-    forwardWebFreshIdx1h.value = 1
-    forwardWebRefreshBrush.value = 0
-    forwardWebLoadMoreBrush.value = 1
+function restoreState(savedState: ForYouState) {
+  videoList.value = [...savedState.videoList]
+  appVideoList.value = [...savedState.appVideoList]
+  refreshIdx.value = savedState.refreshIdx
+  webFreshIdx1h.value = savedState.webFreshIdx1h ?? 1
+  webFreshIdx1hTimestamp = savedState.webFreshIdx1hTimestamp ?? Date.now()
+  webFetchRow.value = savedState.webFetchRow ?? 1
+  webRefreshBrush.value = savedState.webRefreshBrush ?? 0
+  webLoadMoreBrush.value = savedState.webLoadMoreBrush ?? 1
+  webRecommendationUniqId = savedState.webUniqId || createWebRecommendationUniqId()
+  webLastClicklist.value = savedState.webLastClicklist?.slice(-WEB_LAST_CLICKLIST_MAX_ITEMS) || []
+  noMoreContent.value = savedState.noMoreContent
+  if (savedState.webShowlistGroups?.length)
+    webShowlistGroups.value = savedState.webShowlistGroups.filter(Boolean).slice(-1)
+  else
+    rebuildShowlistGroupsFromList(videoList.value)
+  hasInitializedData.value = true
+  isLoading.value = false
 
-    // 恢复滚动位置
-    if (savedState.scrollTop) {
-      nextTick(() => {
-        const viewport = scrollViewportRef.value
-        if (viewport)
-          viewport.scrollTop = savedState.scrollTop || 0
-      })
-    }
+  // Store 只负责跨卸载恢复。数据已交还给当前组件后立即释放快照，
+  // 避免 KeepAlive 中的活动列表与 Pinia 同时各持有一整份推荐数据。
+  forYouStore.resetState()
 
-    // 延迟初始化页面交互功能，避免立即触发数据加载
+  hasBackState.value = false
+  hasForwardState.value = false
+  undoForwardState.value = UndoForwardState.Hidden
+  cachedVideoList.value = []
+  cachedRefreshIdx.value = 1
+  cachedWebFetchRow.value = 1
+  cachedWebFreshIdx1h.value = 1
+  cachedWebRefreshBrush.value = 0
+  cachedWebLoadMoreBrush.value = 1
+  forwardVideoList.value = []
+  forwardRefreshIdx.value = 1
+  forwardWebFetchRow.value = 1
+  forwardWebFreshIdx1h.value = 1
+  forwardWebRefreshBrush.value = 0
+  forwardWebLoadMoreBrush.value = 1
+
+  nextTick(() => {
+    const viewport = scrollViewportRef.value
+    if (viewport)
+      viewport.scrollTop = savedState.scrollTop || 0
+  })
+
+  scheduleInitTask(() => {
+    initPageAction()
     scheduleInitTask(() => {
-      initPageAction()
-      // 在初始化页面交互功能后，再次确保按钮状态正确
-      scheduleInitTask(() => {
-        if (settings.value.preserveForYouState) {
-          undoForwardState.value = UndoForwardState.Hidden
-        }
-      }, 100)
-    }, 1000)
+      undoForwardState.value = UndoForwardState.Hidden
+    }, 100)
+  }, 1000)
+}
+
+onMounted(() => {
+  const storedState = settings.value.preserveForYouState
+    ? forYouStore.getCompleteState()
+    : undefined
+  const savedState = canRestoreState(initialState)
+    ? initialState
+    : canRestoreState(storedState)
+      ? storedState
+      : undefined
+
+  if (savedState) {
+    restoreState(savedState)
   }
   else {
     // 首次加载或未启用状态保留时，初始化数据
@@ -425,29 +450,8 @@ onDeactivated(clearInitTimers)
 onBeforeUnmount(() => {
   clearInitTimers()
   // 如果启用状态保留，保存当前状态到store
-  if (settings.value.preserveForYouState) {
-    // 获取当前滚动位置
-    const scrollTop = scrollViewportRef.value?.scrollTop || 0
-
-    const currentState = {
-      videoList: [...videoList.value],
-      appVideoList: [...appVideoList.value],
-      refreshIdx: refreshIdx.value,
-      webFreshIdx1h: webFreshIdx1h.value,
-      webFreshIdx1hTimestamp,
-      webFetchRow: webFetchRow.value,
-      webRefreshBrush: webRefreshBrush.value,
-      webLoadMoreBrush: webLoadMoreBrush.value,
-      webUniqId: webRecommendationUniqId,
-      webShowlistGroups: [...webShowlistGroups.value],
-      webLastClicklist: [...webLastClicklist.value],
-      noMoreContent: noMoreContent.value,
-      isInitialized: true,
-      recommendationMode: settings.value.recommendationMode,
-      scrollTop, // 保存滚动位置
-    }
-    forYouStore.saveCompleteState(currentState)
-  }
+  if (settings.value.preserveForYouState)
+    forYouStore.saveCompleteState(captureState())
 })
 
 onKeyStroke((e: KeyboardEvent) => {
@@ -1653,6 +1657,7 @@ function jumpToLoginPage() {
 // 修改 defineExpose，暴露重置方法和撤销方法
 defineExpose({
   initData,
+  captureState,
   undoRefresh: () => {
     handleUndoRefresh.value?.()
   },
