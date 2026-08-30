@@ -799,6 +799,10 @@ function getCurrentColumnCount(layout: GridLayoutType, width: number): number {
 }
 
 function findScrollElement(): HTMLElement | null {
+  const providedScrollElement = bewlyApp?.scrollViewportRef.value
+  if (providedScrollElement)
+    return providedScrollElement
+
   if (settings.value.useOriginalBilibiliHomepage)
     return document.scrollingElement as HTMLElement | null
 

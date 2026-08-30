@@ -12,12 +12,17 @@ function t(key: string, params: Record<string, unknown> = {}) {
   return String(i18n.global.t(key, params))
 }
 
-type BewlyWidescreenTab = 'comment' | 'danmaku' | 'playlist'
+type BewlyWidescreenTab = 'comment' | 'danmaku' | 'playlist' | 'home'
 type BewlyWidescreenSidebarMode = 'fit' | 'narrow'
 
 interface MovedNode {
   node: HTMLElement
   placeholder: Comment
+}
+
+interface WidescreenHomeMount {
+  unmount: () => void
+  hasOpenOverlay: () => boolean
 }
 
 interface BewlyWidescreenState {
@@ -48,6 +53,9 @@ interface BewlyWidescreenState {
   sidebarToggleAutoHideCleanup?: () => void
   descriptionCleanup?: () => void
   escapeKeyCleanup?: () => void
+  homeMount?: WidescreenHomeMount
+  homeMountPromise?: Promise<void>
+  homeMountGeneration: number
   descriptionExpanded: boolean
 }
 
@@ -481,11 +489,79 @@ function createPanelEmpty(label: string) {
   return empty
 }
 
+function renderHomeLoadFailure(currentState: BewlyWidescreenState) {
+  const panel = currentState.panels.home
+  if (panel.shadowRoot)
+    return
+
+  const status = createPanelEmpty(t('common.load_failed'))
+  status.classList.add('bewly-widescreen-home-load-failure')
+  const retryButton = document.createElement('button')
+  retryButton.type = 'button'
+  retryButton.className = 'bewly-widescreen-home-retry'
+  retryButton.textContent = t('common.operation.refresh')
+  retryButton.addEventListener('click', () => ensureWidescreenHomeMounted(currentState), { once: true })
+  status.appendChild(retryButton)
+  panel.replaceChildren(status)
+}
+
+function ensureWidescreenHomeMounted(currentState: BewlyWidescreenState) {
+  if (currentState.homeMount || currentState.homeMountPromise)
+    return
+
+  const panel = currentState.panels.home
+  const generation = ++currentState.homeMountGeneration
+  panel.setAttribute('aria-busy', 'true')
+  if (!panel.shadowRoot)
+    panel.replaceChildren(createPanelEmpty(t('common.loading')))
+
+  const mountPromise = (async () => {
+    try {
+      const { mountWidescreenForYou } = await import('./widescreenForYou')
+      if (state !== currentState || currentState.homeMountGeneration !== generation)
+        return
+
+      const homeMount = await mountWidescreenForYou(
+        panel,
+        currentState.sidebarEl,
+        {
+          loadingLabel: t('common.loading'),
+          loadFailedLabel: t('common.load_failed'),
+          retryLabel: t('common.operation.refresh'),
+          onRetry: () => ensureWidescreenHomeMounted(currentState),
+        },
+      )
+
+      if (state !== currentState || currentState.homeMountGeneration !== generation) {
+        homeMount.unmount()
+        return
+      }
+
+      currentState.homeMount = homeMount
+    }
+    catch (error) {
+      if (state === currentState && currentState.homeMountGeneration === generation) {
+        console.error('[BewlyCat] Failed to mount widescreen home feed:', error)
+        renderHomeLoadFailure(currentState)
+      }
+    }
+    finally {
+      if (currentState.homeMountGeneration === generation) {
+        currentState.homeMountPromise = undefined
+        panel.removeAttribute('aria-busy')
+      }
+    }
+  })()
+
+  currentState.homeMountPromise = mountPromise
+}
+
 function setActiveTab(nextTab: BewlyWidescreenTab) {
   if (!state)
     return
 
   state.activeTab = nextTab
+  state.root.dataset.activeTab = nextTab
   for (const [tab, button] of Object.entries(state.tabButtons) as Array<[BewlyWidescreenTab, HTMLButtonElement]>) {
     const active = tab === nextTab
     button.classList.toggle('is-active', active)
@@ -495,6 +571,8 @@ function setActiveTab(nextTab: BewlyWidescreenTab) {
 
   if (nextTab === 'danmaku')
     expandDanmakuTab(state)
+  else if (nextTab === 'home')
+    ensureWidescreenHomeMounted(state)
 }
 
 function setSidebarMode(nextMode: BewlyWidescreenSidebarMode) {
@@ -1039,8 +1117,9 @@ function createRoot(sidebarPosition: 'left' | 'right' = 'right') {
     comment: createTabButton('comment', t('widescreen.comments')),
     danmaku: createTabButton('danmaku', t('widescreen.danmaku')),
     playlist: createTabButton('playlist', t('widescreen.episodes')),
+    home: createTabButton('home', t('widescreen.home')),
   }
-  tablist.append(tabButtons.comment, tabButtons.danmaku, tabButtons.playlist)
+  tablist.append(tabButtons.comment, tabButtons.danmaku, tabButtons.playlist, tabButtons.home)
 
   const panelWrap = document.createElement('div')
   panelWrap.className = 'bewly-widescreen-panels'
@@ -1049,6 +1128,7 @@ function createRoot(sidebarPosition: 'left' | 'right' = 'right') {
     comment: document.createElement('section'),
     danmaku: document.createElement('section'),
     playlist: document.createElement('section'),
+    home: document.createElement('section'),
   }
 
   for (const [tab, panel] of Object.entries(panels) as Array<[BewlyWidescreenTab, HTMLElement]>) {
@@ -2050,7 +2130,7 @@ function injectLayoutStyle() {
       position: relative;
       z-index: 0;
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(4, 1fr);
       flex: 0 0 auto;
       height: 42px;
       background: var(--bewly-widescreen-surface-bg);
@@ -2338,6 +2418,34 @@ function injectLayoutStyle() {
       min-height: 160px;
       color: var(--bewly-widescreen-text-muted);
       font-size: 14px;
+    }
+
+    #${ROOT_ID} .bewly-widescreen-home-load-failure {
+      flex-direction: column;
+      gap: var(--bew-space-3, 12px);
+    }
+
+    #${ROOT_ID} .bewly-widescreen-home-retry {
+      min-width: 72px;
+      min-height: 32px;
+      padding: var(--bew-space-1, 4px) var(--bew-space-3, 12px);
+      border: 1px solid var(--bewly-widescreen-sidebar-border);
+      border-radius: var(--bew-interactive-radius, 8px);
+      color: var(--bewly-widescreen-text-primary);
+      background: var(--bewly-widescreen-control-bg);
+      cursor: pointer;
+      font-size: var(--bew-font-size-control, 13px);
+      font-weight: var(--bew-font-weight-medium, 500);
+      line-height: var(--bew-line-height-control, 18px);
+    }
+
+    #${ROOT_ID} .bewly-widescreen-home-retry:hover {
+      background: var(--bewly-widescreen-control-hover-bg);
+    }
+
+    #${ROOT_ID} .bewly-widescreen-home-retry:focus-visible {
+      outline: 2px solid var(--bew-theme-color, #00aeec);
+      outline-offset: 2px;
     }
 
     @media (max-width: ${MOBILE_BREAKPOINT}px) {
@@ -2902,6 +3010,10 @@ function shortenCommentTimes(panel: HTMLElement) {
 }
 
 function cleanupState(currentState: BewlyWidescreenState) {
+  currentState.homeMountGeneration++
+  currentState.homeMount?.unmount()
+  currentState.homeMount = undefined
+  currentState.homeMountPromise = undefined
   currentState.escapeKeyCleanup?.()
   currentState.sidebarInteractionCleanup?.()
   currentState.sidebarToggleAutoHideCleanup?.()
@@ -2976,6 +3088,7 @@ function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
     activeTab: 'comment',
     sidebarMode: 'fit',
     sidebarPosition,
+    homeMountGeneration: 0,
     descriptionExpanded: false,
   }
 
@@ -2986,6 +3099,8 @@ function applyNow(sidebarPosition: 'left' | 'right' = 'right') {
     if (event.key !== 'Escape')
       return
     if (isPhotoViewerOpen())
+      return
+    if (nextState.homeMount?.hasOpenOverlay())
       return
 
     event.preventDefault()

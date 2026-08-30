@@ -22,8 +22,9 @@ import { decodeHtmlEntities } from '~/utils/htmlDecode'
 import { getCookie } from '~/utils/main'
 import { isVerticalVideo } from '~/utils/uriParse'
 
-const { gridLayout } = defineProps<{
+const { gridLayout, cardClickHandler } = defineProps<{
   gridLayout: GridLayoutType
+  cardClickHandler?: (item: VideoElement | AppVideoElement, event: MouseEvent) => void
 }>()
 
 const emit = defineEmits<{
@@ -1688,6 +1689,7 @@ defineExpose({
       :transform-item="(item: VideoElement | AppVideoElement) => item.displayData"
       :get-item-key="(item: VideoElement | AppVideoElement, index?: number) => `${item.uniqueId}-${index ?? 0}`"
       :video-type="isWebRecommendationMode ? 'rcmd' : 'appRcmd'"
+      :card-click-handler="cardClickHandler"
       :card-exposure-handler="markWebRecommendationExposed"
       :card-click-observer="recordWebRecommendationClick"
       show-preview
