@@ -1,7 +1,7 @@
 import type { ForYouState } from '~/stores/forYouStore'
 
 export const WIDESCREEN_HOME_TRANSFER_PARAM = 'bewly_widescreen_home'
-export const WIDESCREEN_HOME_TRANSFER_VERSION = 1
+export const WIDESCREEN_HOME_TRANSFER_VERSION = 2
 export const WIDESCREEN_HOME_TRANSFER_TTL_MS = 30 * 60 * 1000
 export const WIDESCREEN_HOME_TRANSFER_MAX_RECORDS = 8
 

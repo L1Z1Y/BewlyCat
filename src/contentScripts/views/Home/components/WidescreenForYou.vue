@@ -40,6 +40,122 @@ const undoForwardState = ref(UndoForwardState.Hidden)
 const activeDrawer = ref<DrawerType>(DrawerType.None)
 const pendingSettingsNavigation = ref<SettingsNavigationTarget>()
 const forYouRef = shallowRef<ForYouExposed>()
+const initialForYouState = props.initialState
+  ? {
+      ...props.initialState,
+      // 宽屏首页使用侧栏外层滚动。数据先恢复，滚动位置由本组件
+      // 按显示窗口中心的视频序号单独恢复。
+      scrollTop: 0,
+    }
+  : undefined
+
+let scrollRestorationCleanup: (() => void) | undefined
+
+function getHomePanel(): HTMLElement | null {
+  const rootNode = props.teleportTarget.getRootNode()
+  return rootNode instanceof ShadowRoot && rootNode.host instanceof HTMLElement
+    ? rootNode.host
+    : null
+}
+
+function getVideoCards(): HTMLElement[] {
+  return Array.from(props.teleportTarget.querySelectorAll<HTMLElement>(
+    '.video-card-container--interactive[data-index]',
+  ))
+}
+
+function captureCenteredVideoIndex(): number | undefined {
+  const cards = getVideoCards()
+  if (!cards.length)
+    return undefined
+
+  const viewportRect = props.scrollViewport.getBoundingClientRect()
+  const viewportCenter = viewportRect.top + viewportRect.height / 2
+  const cardPositions = cards.map(card => ({ card, rect: card.getBoundingClientRect() }))
+  const cardAtCenter = cardPositions.find(({ rect }) => (
+    rect.top <= viewportCenter && rect.bottom >= viewportCenter
+  ))
+  const centeredCard = cardAtCenter ?? cardPositions.reduce((closestCard, card) => {
+    const closestDistance = Math.abs((closestCard.rect.top + closestCard.rect.bottom) / 2 - viewportCenter)
+    const cardDistance = Math.abs((card.rect.top + card.rect.bottom) / 2 - viewportCenter)
+    return cardDistance < closestDistance ? card : closestCard
+  })
+  const index = Number(centeredCard.card.dataset.index)
+
+  return Number.isInteger(index) && index >= 0 ? index : undefined
+}
+
+function restoreCenteredVideo(index: number) {
+  scrollRestorationCleanup?.()
+
+  const panel = getHomePanel()
+  if (!panel)
+    return
+
+  let stopped = false
+  const timers = new Set<number>()
+  const observedElements = [
+    panel,
+    props.scrollViewport.querySelector<HTMLElement>('.bewly-widescreen-sidebar-top'),
+  ].filter((element): element is HTMLElement => Boolean(element))
+
+  const applyScrollTop = () => {
+    if (stopped)
+      return
+
+    const card = props.teleportTarget.querySelector<HTMLElement>(
+      `.video-card-container--interactive[data-index="${index}"]`,
+    )
+    if (!card)
+      return
+
+    const viewportRect = props.scrollViewport.getBoundingClientRect()
+    const cardRect = card.getBoundingClientRect()
+    const viewportCenter = viewportRect.top + viewportRect.height / 2
+    const cardCenter = (cardRect.top + cardRect.bottom) / 2
+    const targetScrollTop = Math.max(
+      0,
+      props.scrollViewport.scrollTop + cardCenter - viewportCenter,
+    )
+    if (Math.abs(props.scrollViewport.scrollTop - targetScrollTop) > 0.5)
+      props.scrollViewport.scrollTo({ top: targetScrollTop })
+  }
+
+  const resizeObserver = new ResizeObserver(applyScrollTop)
+  observedElements.forEach(element => resizeObserver.observe(element))
+
+  const stop = () => {
+    if (stopped)
+      return
+    stopped = true
+    resizeObserver.disconnect()
+    timers.forEach(timer => window.clearTimeout(timer))
+    timers.clear()
+    props.scrollViewport.removeEventListener('wheel', stop)
+    props.scrollViewport.removeEventListener('touchstart', stop)
+    props.scrollViewport.removeEventListener('pointerdown', stop)
+    props.scrollViewport.removeEventListener('keydown', stop)
+    if (scrollRestorationCleanup === stop)
+      scrollRestorationCleanup = undefined
+  }
+
+  scrollRestorationCleanup = stop
+  props.scrollViewport.addEventListener('wheel', stop, { passive: true })
+  props.scrollViewport.addEventListener('touchstart', stop, { passive: true })
+  props.scrollViewport.addEventListener('pointerdown', stop, { passive: true })
+  props.scrollViewport.addEventListener('keydown', stop)
+
+  for (const delay of [0, 80, 240, 600, 1200]) {
+    const timer = window.setTimeout(() => {
+      timers.delete(timer)
+      applyScrollTop()
+    }, delay)
+    timers.add(timer)
+  }
+
+  const stopTimer = window.setTimeout(stop, 1500)
+  timers.add(stopTimer)
+}
 
 function handleSidebarScroll() {
   const nextScrollTop = props.scrollViewport.scrollTop
@@ -102,6 +218,7 @@ async function handleCardClick(item: VideoElement | AppVideoElement, event: Mous
     return
   }
 
+  snapshot.widescreenHomeCenteredVideoIndex = captureCenteredVideoIndex()
   await openVideoWithWidescreenHomeSnapshot(url, snapshot, getNavigationDisposition(event))
 }
 
@@ -136,12 +253,19 @@ const provider: BewlyAppProvider = {
 
 provide<BewlyAppProvider>('BEWLY_APP', provider)
 
-onMounted(() => {
+onMounted(async () => {
   props.scrollViewport.addEventListener('scroll', handleSidebarScroll, { passive: true })
   handleSidebarScroll()
+
+  const centeredVideoIndex = props.initialState?.widescreenHomeCenteredVideoIndex
+  if (typeof centeredVideoIndex === 'number' && Number.isInteger(centeredVideoIndex)) {
+    await nextTick()
+    restoreCenteredVideo(centeredVideoIndex)
+  }
 })
 
 onUnmounted(() => {
+  scrollRestorationCleanup?.()
   props.scrollViewport.removeEventListener('scroll', handleSidebarScroll)
 })
 </script>
@@ -151,7 +275,7 @@ onUnmounted(() => {
     <ForYou
       ref="forYouRef"
       grid-layout="oneColumn"
-      :initial-state="initialState"
+      :initial-state="initialForYouState"
       :card-click-handler="handleCardClick"
     />
   </div>

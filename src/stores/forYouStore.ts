@@ -66,6 +66,8 @@ export interface ForYouState {
 
   // 滚动位置
   scrollTop?: number
+  // Bewly 宽屏首页跳转时位于显示窗口中心的视频序号。
+  widescreenHomeCenteredVideoIndex?: number
 
   // 是否已初始化
   isInitialized: boolean
