@@ -46,6 +46,7 @@ interface BewlyWidescreenState {
   movedNodes: MovedNode[]
   styleEl: HTMLStyleElement
   activeTab: BewlyWidescreenTab
+  tabScrollTops: Record<BewlyWidescreenTab, number>
   sidebarMode: BewlyWidescreenSidebarMode
   sidebarPosition: 'left' | 'right'
   resizeObserver?: ResizeObserver
@@ -567,6 +568,10 @@ function setActiveTab(nextTab: BewlyWidescreenTab) {
   if (!state)
     return
 
+  const previousTab = state.activeTab
+  if (previousTab !== nextTab)
+    state.tabScrollTops[previousTab] = state.sidebarEl.scrollTop
+
   state.activeTab = nextTab
   state.root.dataset.activeTab = nextTab
   for (const [tab, button] of Object.entries(state.tabButtons) as Array<[BewlyWidescreenTab, HTMLButtonElement]>) {
@@ -575,6 +580,9 @@ function setActiveTab(nextTab: BewlyWidescreenTab) {
     button.setAttribute('aria-selected', String(active))
     state.panels[tab].hidden = !active
   }
+
+  if (previousTab !== nextTab)
+    state.sidebarEl.scrollTop = state.tabScrollTops[nextTab]
 
   if (nextTab === 'danmaku')
     expandDanmakuTab(state)
@@ -3207,6 +3215,12 @@ function createWidescreenState(sidebarPosition: 'left' | 'right' = 'right') {
     movedNodes,
     styleEl,
     activeTab: 'home',
+    tabScrollTops: {
+      home: 0,
+      comment: 0,
+      danmaku: 0,
+      playlist: 0,
+    },
     sidebarMode: 'fit',
     sidebarPosition,
     homeMountGeneration: 0,
