@@ -1479,6 +1479,7 @@ widescreen:
   exit: 退出
   exit_title: 退出 Bewly 宽屏
   loading: 正在加载宽屏模式…
+  switching_video: 正在切换视频…
   exit_overlay: 退出遮罩
   comments: 评论
   danmaku: 弹幕

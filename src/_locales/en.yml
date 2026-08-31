@@ -1583,6 +1583,7 @@ widescreen:
   exit: Exit
   exit_title: Exit Bewly widescreen
   loading: Loading widescreen mode…
+  switching_video: Switching video…
   exit_overlay: Exit overlay
   comments: Comments
   danmaku: Danmaku

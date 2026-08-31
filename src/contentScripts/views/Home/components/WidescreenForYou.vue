@@ -8,8 +8,11 @@ import ForYou from '~/contentScripts/views/Home/components/ForYou.vue'
 import { HomeSubPage } from '~/contentScripts/views/Home/types'
 import { AppPage } from '~/enums/appEnums'
 import type { AppVideoElement, ForYouState, VideoElement } from '~/stores/forYouStore'
+import { removeHttpFromUrl } from '~/utils/main'
 import emitter from '~/utils/mitt'
 import { openVideoWithWidescreenHomeSnapshot } from '~/utils/widescreenHomeTransfer'
+import type { WidescreenSoftSwitchTarget } from '~/utils/widescreenSoftSwitch'
+import { requestWidescreenSoftVideoSwitch } from '~/utils/widescreenSoftSwitch'
 
 const props = defineProps<{
   scrollViewport: HTMLElement
@@ -207,10 +210,44 @@ function getNavigationDisposition(event: MouseEvent): WidescreenHomeNavigationDi
   return 'current'
 }
 
+/**
+ * 卡片自带 bvid / aid / cid / 封面，够直接驱动 B 站的页面内换片，
+ * 不需要额外请求视频详情。番剧、直播和跳转到站外的卡片不适用。
+ */
+function getSoftSwitchTarget(item: VideoElement | AppVideoElement, url: string): WidescreenSoftSwitchTarget | null {
+  const displayData = item.displayData
+  const bvid = displayData?.bvid?.trim()
+  const aid = Number(displayData?.id)
+  if (!bvid || !Number.isSafeInteger(aid) || aid <= 0)
+    return null
+  if (displayData?.goto && displayData.goto !== 'av')
+    return null
+  if (!/\/video\/(?:BV|av)/i.test(url))
+    return null
+
+  const cid = Number(displayData?.cid)
+  const cover = displayData?.cover ? removeHttpFromUrl(displayData.cover) : ''
+
+  return {
+    url,
+    bvid,
+    aid,
+    cid: Number.isSafeInteger(cid) && cid > 0 ? cid : undefined,
+    coverUrl: cover ? `${cover}@1440w_810h_1c` : undefined,
+  }
+}
+
 async function handleCardClick(item: VideoElement | AppVideoElement, event: MouseEvent) {
   const url = getVideoUrl(item, event)
   if (!url)
     return
+
+  // 当前页打开时优先原地换片：宽屏外壳、本列表和滚动位置都保持不动。
+  if (getNavigationDisposition(event) === 'current') {
+    const softSwitchTarget = getSoftSwitchTarget(item, url)
+    if (softSwitchTarget && await requestWidescreenSoftVideoSwitch(softSwitchTarget))
+      return
+  }
 
   const snapshot = forYouRef.value?.captureState()
   if (!snapshot) {

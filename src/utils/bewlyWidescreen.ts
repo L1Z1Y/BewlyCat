@@ -61,6 +61,14 @@ interface BewlyWidescreenState {
   homeMountPromise?: Promise<void>
   homeMountGeneration: number
   descriptionExpanded: boolean
+  /** 页面内换片期间盖住播放器的封面层。 */
+  playerCover?: HTMLElement
+  playerCoverCleanup?: () => void
+  /** 换片后仍显示旧视频内容、等待激活时才刷新的标签。 */
+  staleTabs: Record<BewlyWidescreenTab, boolean>
+  softSwitchSyncTimers?: Array<ReturnType<typeof setTimeout>>
+  /** 延后到「评论」标签激活时才执行的评论区重载。 */
+  pendingCommentRefresh?: () => void
 }
 
 const ROOT_ID = 'bewly-widescreen-root'
@@ -81,6 +89,11 @@ const SIDEBAR_NARROW_MAX_WIDTH = 460
 const MOBILE_BREAKPOINT = 900
 const LOAD_SETTLE_DELAY = 1200
 const LOADING_FADE_DURATION = 240
+const PLAYER_COVER_FADE_DURATION = 240
+const PLAYER_COVER_TIMEOUT = 10_000
+const PLAYER_COVER_READY_EVENTS = ['playing', 'loadeddata', 'canplay'] as const
+/** 换片后侧栏标题与简介的补偿同步节奏，覆盖 B 站拉取新视频数据的窗口。 */
+const SOFT_SWITCH_SYNC_DELAYS = [120, 320, 700, 1400, 2600]
 const SWITCH_HINT_FADE_DURATION = 180
 const SWITCH_HINT_TIMEOUT = 6000
 const LOADING_EXIT_BUTTON_DELAY = 5000
@@ -580,6 +593,8 @@ function setActiveTab(nextTab: BewlyWidescreenTab) {
     button.setAttribute('aria-selected', String(active))
     state.panels[tab].hidden = !active
   }
+
+  refreshStaleTab(state, nextTab)
 
   if (previousTab !== nextTab)
     state.sidebarEl.scrollTop = state.tabScrollTops[nextTab]
@@ -1170,6 +1185,168 @@ function createPlayerPlaceholder() {
   return placeholder
 }
 
+function removePlayerCover(currentState: BewlyWidescreenState, immediate = false) {
+  currentState.playerCoverCleanup?.()
+  currentState.playerCoverCleanup = undefined
+
+  const cover = currentState.playerCover
+  currentState.playerCover = undefined
+  if (!cover)
+    return
+
+  if (immediate) {
+    cover.remove()
+    return
+  }
+
+  cover.classList.add('is-leaving')
+  setTimeout(() => cover.remove(), PLAYER_COVER_FADE_DURATION)
+}
+
+/**
+ * 换片期间用新视频封面盖住播放器，避免看到旧画面或黑屏。
+ * 新视频出画（playing / loadeddata / canplay）后淡出，另有兜底超时。
+ */
+function showPlayerCover(currentState: BewlyWidescreenState, coverUrl: string | undefined) {
+  removePlayerCover(currentState, true)
+
+  const cover = document.createElement('div')
+  cover.className = 'bewly-widescreen-player-cover'
+  cover.setAttribute('role', 'status')
+  cover.setAttribute('aria-label', t('widescreen.switching_video'))
+
+  if (coverUrl) {
+    const image = document.createElement('img')
+    image.className = 'bewly-widescreen-player-cover__image'
+    image.src = coverUrl
+    image.alt = ''
+    image.setAttribute('aria-hidden', 'true')
+    // 封面取不到时留下纯深色底，不再退回加载动画。
+    image.addEventListener('error', () => image.remove(), { once: true })
+    cover.appendChild(image)
+  }
+
+  currentState.playerFrame.appendChild(cover)
+  currentState.playerCover = cover
+
+  const finish = () => {
+    if (state !== currentState || currentState.playerCover !== cover)
+      return
+
+    removePlayerCover(currentState)
+    // 新视频出画即认为播放器与页面 DOM 已稳定：<video> 可能被换掉，
+    // 弹幕输入栏等播放器内部节点也可能被重建，这里统一重新接管一次。
+    bindVideoMetadataListener(currentState)
+    updateAspectRatio()
+    fillSidebar(currentState)
+  }
+
+  const handleMediaReady = (event: Event) => {
+    const video = event.target
+    if (video instanceof HTMLMediaElement && video === getVideoElement())
+      finish()
+  }
+
+  for (const eventName of PLAYER_COVER_READY_EVENTS)
+    document.addEventListener(eventName, handleMediaReady, true)
+  const fallbackTimer = setTimeout(finish, PLAYER_COVER_TIMEOUT)
+
+  currentState.playerCoverCleanup = () => {
+    clearTimeout(fallbackTimer)
+    for (const eventName of PLAYER_COVER_READY_EVENTS)
+      document.removeEventListener(eventName, handleMediaReady, true)
+  }
+}
+
+/**
+ * 页面内换片：宽屏外壳、侧栏「首页」列表与滚动位置全部保留，
+ * 只刷新视频介绍区并把其余标签标记为待刷新。
+ */
+export function beginBewlyWidescreenSoftSwitch(
+  options: { coverUrl?: string } = {},
+) {
+  const currentState = state
+  if (!currentState || currentState.phase !== 'active')
+    return false
+
+  showPlayerCover(currentState, options.coverUrl)
+
+  currentState.descriptionExpanded = false
+  // B 站会原地 patch 已搬进侧栏的节点，但 <video> 可能被 player.reload 换掉。
+  bindVideoMetadataListener(currentState)
+  schedulePlayerResizeSync(currentState)
+
+  for (const tab of ['comment', 'danmaku', 'playlist'] as const) {
+    currentState.staleTabs[tab] = true
+    currentState.tabScrollTops[tab] = 0
+  }
+
+  // 侧栏标题是副本、简介折叠状态依赖实际高度，两者都要等 B 站拉回新视频数据。
+  // DOM 观察器的 800ms 去抖对「介绍区随视频直接切换」来说太慢，这里用短梯度补齐。
+  scheduleSoftSwitchSync(currentState)
+
+  return true
+}
+
+function clearSoftSwitchSync(currentState: BewlyWidescreenState) {
+  currentState.softSwitchSyncTimers?.forEach(timer => clearTimeout(timer))
+  currentState.softSwitchSyncTimers = []
+}
+
+function scheduleSoftSwitchSync(currentState: BewlyWidescreenState) {
+  clearSoftSwitchSync(currentState)
+
+  const sync = () => {
+    if (state !== currentState)
+      return
+
+    syncSidebarTitle(currentState)
+    syncDescription(currentState)
+  }
+
+  sync()
+  currentState.softSwitchSyncTimers = SOFT_SWITCH_SYNC_DELAYS.map(delay =>
+    setTimeout(sync, delay),
+  )
+}
+
+/** 页面内换片没能生效时回滚：撤掉封面并恢复各标签的正常刷新状态。 */
+export function cancelBewlyWidescreenSoftSwitch() {
+  const currentState = state
+  if (!currentState)
+    return
+
+  clearSoftSwitchSync(currentState)
+  removePlayerCover(currentState, true)
+  currentState.pendingCommentRefresh = undefined
+  for (const tab of Object.keys(currentState.staleTabs) as BewlyWidescreenTab[])
+    currentState.staleTabs[tab] = false
+}
+
+/** 记录延后执行的评论区重载；点击「评论」标签时才真正切到新视频的评论。 */
+export function setBewlyWidescreenPendingCommentRefresh(refresh: () => void) {
+  if (!state)
+    return
+
+  state.pendingCommentRefresh = refresh
+}
+
+function refreshStaleTab(currentState: BewlyWidescreenState, tab: BewlyWidescreenTab) {
+  if (!currentState.staleTabs[tab])
+    return
+
+  currentState.staleTabs[tab] = false
+
+  if (tab === 'comment') {
+    const refresh = currentState.pendingCommentRefresh
+    currentState.pendingCommentRefresh = undefined
+    refresh?.()
+  }
+
+  // fillSidebar 幂等，负责接管 B 站可能新建的评论区、弹幕列表与选集/推荐节点。
+  fillSidebar(currentState)
+}
+
 function createRoot(sidebarPosition: 'left' | 'right' = 'right') {
   const root = document.createElement('div')
   root.id = ROOT_ID
@@ -1397,6 +1574,34 @@ function injectLayoutStyle() {
       width: 36px;
       height: 36px;
       flex: 0 0 auto;
+      object-fit: contain;
+    }
+
+    #${ROOT_ID} .bewly-widescreen-player-frame > .bewly-widescreen-player-cover {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      display: flex;
+      width: 100% !important;
+      max-width: none !important;
+      height: 100% !important;
+      max-height: none !important;
+      align-items: center;
+      justify-content: center;
+      margin: 0 !important;
+      background: #050609;
+      opacity: 1;
+      pointer-events: none;
+      transition: opacity ${PLAYER_COVER_FADE_DURATION}ms ease;
+    }
+
+    #${ROOT_ID} .bewly-widescreen-player-frame > .bewly-widescreen-player-cover.is-leaving {
+      opacity: 0;
+    }
+
+    #${ROOT_ID} .bewly-widescreen-player-cover__image {
+      width: 100%;
+      height: 100%;
       object-fit: contain;
     }
 
@@ -2769,16 +2974,24 @@ function schedulePlayerResizeSync(currentState: BewlyWidescreenState) {
   )
 }
 
-function setupAspectObservers(currentState: BewlyWidescreenState) {
+function bindVideoMetadataListener(currentState: BewlyWidescreenState) {
+  currentState.metadataListener?.()
+  currentState.metadataListener = undefined
+
   const video = getVideoElement()
-  if (video) {
-    const onLoadedMetadata = () => {
-      updateAspectRatio()
-      scheduleSidebarRefresh()
-    }
-    video.addEventListener('loadedmetadata', onLoadedMetadata)
-    currentState.metadataListener = () => video.removeEventListener('loadedmetadata', onLoadedMetadata)
+  if (!video)
+    return
+
+  const onLoadedMetadata = () => {
+    updateAspectRatio()
+    scheduleSidebarRefresh()
   }
+  video.addEventListener('loadedmetadata', onLoadedMetadata)
+  currentState.metadataListener = () => video.removeEventListener('loadedmetadata', onLoadedMetadata)
+}
+
+function setupAspectObservers(currentState: BewlyWidescreenState) {
+  bindVideoMetadataListener(currentState)
 
   currentState.resizeObserver = new ResizeObserver(() => {
     updateAspectRatio()
@@ -3137,6 +3350,9 @@ function shortenCommentTimes(panel: HTMLElement) {
 }
 
 function cleanupState(currentState: BewlyWidescreenState) {
+  clearSoftSwitchSync(currentState)
+  removePlayerCover(currentState, true)
+  currentState.pendingCommentRefresh = undefined
   currentState.homeMountGeneration++
   currentState.homeMount?.unmount()
   currentState.homeMount = undefined
@@ -3225,6 +3441,12 @@ function createWidescreenState(sidebarPosition: 'left' | 'right' = 'right') {
     sidebarPosition,
     homeMountGeneration: 0,
     descriptionExpanded: false,
+    staleTabs: {
+      home: false,
+      comment: false,
+      danmaku: false,
+      playlist: false,
+    },
   }
 
   state = nextState

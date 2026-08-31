@@ -3970,6 +3970,75 @@ else if (shouldInitializePageScript) {
       patchCommentCustomElement(name, window.customElements.get(name))
   }
 
+  /** B 站视频页根组件下换片方法所在层级很浅，限制搜索深度避免遍历整棵组件树。 */
+  const SOFT_SWITCH_COMPONENT_MAX_DEPTH = 4
+
+  /**
+   * 找到 B 站视频页负责「原地换视频」的 Vue 组件。
+   * 该组件同时提供 handleVideoRoute（改 URL）与 switchVideo（换 store + player.reload），
+   * 正是 B 站自动连播、推荐跳转所走的同一条链路。
+   */
+  function findVideoSwitchComponent(): any {
+    const root = (document.querySelector('#app') as any)?.__vue__?.$root
+    if (!root)
+      return null
+
+    const queue: Array<{ vm: any, depth: number }> = [{ vm: root, depth: 0 }]
+    while (queue.length) {
+      const { vm, depth } = queue.shift()!
+      const methods = vm?.$options?.methods
+      if (typeof methods?.switchVideo === 'function'
+        && typeof methods?.handleVideoRoute === 'function'
+        && typeof vm.switchVideo === 'function'
+        && typeof vm.handleVideoRoute === 'function') {
+        return vm
+      }
+
+      if (depth >= SOFT_SWITCH_COMPONENT_MAX_DEPTH)
+        continue
+
+      for (const child of vm?.$children || [])
+        queue.push({ vm: child, depth: depth + 1 })
+    }
+
+    return null
+  }
+
+  function handleSoftSwitchVideoRequest(data: any) {
+    const requestId = data?.requestId
+    const bvid = typeof data?.bvid === 'string' ? data.bvid : ''
+    const aid = Number(data?.aid)
+    const cid = Number(data?.cid)
+    const p = Number(data?.p) || 1
+    let ok = false
+
+    // handleVideoRoute 要求 bvid 与 aid 同时存在，否则会静默什么都不做。
+    if (bvid && Number.isSafeInteger(aid) && aid > 0) {
+      try {
+        const vm = findVideoSwitchComponent()
+        if (vm) {
+          vm.handleVideoRoute({ bvid, aid, p })
+          vm.switchVideo({
+            aid,
+            bvid,
+            cid: Number.isSafeInteger(cid) && cid > 0 ? cid : undefined,
+            p,
+          })
+          ok = true
+        }
+      }
+      catch (error) {
+        console.warn('[BewlyCat] Failed to switch video in place:', error)
+        ok = false
+      }
+    }
+
+    window.postMessage({
+      type: 'BEWLY_SOFT_SWITCH_VIDEO_RESULT',
+      data: { requestId, ok },
+    }, window.location.origin)
+  }
+
   // 添加消息监听器
   window.addEventListener('message', (event) => {
   // 确保消息来源是插件环境
@@ -3980,6 +4049,11 @@ else if (shouldInitializePageScript) {
       return
 
     const { type, data } = event.data
+
+    if (type === 'BEWLY_SOFT_SWITCH_VIDEO') {
+      handleSoftSwitchVideoRequest(data)
+      return
+    }
 
     // 处理来自插件环境的消息
     if (type === 'BEWLY_SETTINGS_UPDATE') {

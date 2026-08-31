@@ -11,7 +11,7 @@ import { setupApp } from '~/logic/common-setup'
 import { useTopBarStore } from '~/stores/topBarStore'
 import RESET_BEWLY_CSS from '~/styles/reset.css?raw'
 import api from '~/utils/api'
-import { applyBewlyWidescreen, BEWLY_WIDESCREEN_USER_EXIT, exitBewlyWidescreen, isBewlyWidescreenActive, isBewlyWidescreenEngaged, prepareBewlyWidescreenLoading, prepareBewlyWidescreenShell } from '~/utils/bewlyWidescreen'
+import { applyBewlyWidescreen, beginBewlyWidescreenSoftSwitch, BEWLY_WIDESCREEN_USER_EXIT, cancelBewlyWidescreenSoftSwitch, exitBewlyWidescreen, isBewlyWidescreenActive, isBewlyWidescreenEngaged, prepareBewlyWidescreenLoading, prepareBewlyWidescreenShell, setBewlyWidescreenPendingCommentRefresh } from '~/utils/bewlyWidescreen'
 import { cleanupBilibiliScripts } from '~/utils/bilibiliScriptCleanup'
 import { captureOriginalBilibiliTopBar, ensureOriginalBilibiliTopBarAppended, resetBilibiliTopBarInlineStyles, setupLoginButtonClickHandlers, shouldShowOriginalBilibiliTopBar } from '~/utils/bilibiliTopBar'
 import { findLeafActiveElement } from '~/utils/element'
@@ -33,6 +33,7 @@ import { initVerticalVideoZoom, resetVerticalVideoZoom } from '~/utils/verticalV
 import { recordVideoVisitFromUrl } from '~/utils/videoVisitHistory'
 import { ensureResponsiveViewport } from '~/utils/viewportMeta'
 import { captureWidescreenHomeTransferToken } from '~/utils/widescreenHomeTransfer'
+import { registerWidescreenSoftSwitchDriver, sendWidescreenSoftSwitchToPage } from '~/utils/widescreenSoftSwitch'
 
 import { version } from '../../package.json'
 import { initBewlyWidescreenControl } from './bewlyWidescreenControl'
@@ -255,6 +256,9 @@ else if (shouldInitializeContentScript) {
     : Number.POSITIVE_INFINITY
   let pendingWidescreenReloadNavigationKey: string | undefined
   let pendingWidescreenReloadTimer: ReturnType<typeof setTimeout> | undefined
+  let pendingSoftSwitchNavigationKey: string | undefined
+  let pendingSoftSwitchAid: number | undefined
+  let pendingSoftSwitchTimer: ReturnType<typeof setTimeout> | undefined
   let autoContinuationNavigationKey: string | undefined
   let lastVideoEndedAt = 0
   let urlChangeCheckQueued = false
@@ -780,6 +784,15 @@ else if (shouldInitializeContentScript) {
     }
   }
 
+  function clearPendingSoftSwitchNavigation() {
+    pendingSoftSwitchNavigationKey = undefined
+    pendingSoftSwitchAid = undefined
+    if (pendingSoftSwitchTimer) {
+      clearTimeout(pendingSoftSwitchTimer)
+      pendingSoftSwitchTimer = undefined
+    }
+  }
+
   const commentRootSelector = '#commentapp, #comment-module, #comment-body, .commentapp, .comment-container, .bili-comment-container, .bb-comment'
   const widescreenCommentReloadRetryInterval = 250
   const widescreenCommentReloadRetryTimeout = 10_000
@@ -872,6 +885,10 @@ else if (shouldInitializeContentScript) {
     if (!Number.isSafeInteger(aid) || aid <= 0)
       return
 
+    applyCommentsAid(aid, targetNavigationKey, requestId)
+  }
+
+  function applyCommentsAid(aid: number, targetNavigationKey: string, requestId: number) {
     const deadline = Date.now() + widescreenCommentReloadRetryTimeout
     const retryUntilCommentReady = () => {
       if (requestId !== widescreenCommentReloadRequestId
@@ -900,6 +917,96 @@ else if (shouldInitializeContentScript) {
     retryUntilCommentReady()
   }
 
+  /** 页面内换片完成后的记账：跳过宽屏重建，只补上跟随视频的那些副作用。 */
+  function finishWidescreenSoftSwitch(targetNavigationKey: string, requestId: number, aid: number | undefined) {
+    clearPlayerModeRetry()
+    playerModeApplyPromise = undefined
+    playerModeApplyNavigationKey = undefined
+    resetVerticalVideoZoom()
+    document.querySelector('.bewly-watch-later-btn')?.remove()
+    watchLaterButtonAdded = false
+    resetAutoPlayUserChangeFlag()
+    resetRandomPlayInitialization()
+    applyPlayerModeCompanionSettings()
+    lastAppliedPlayerModeNavigationKey = targetNavigationKey
+
+    // 评论区是 B 站 SPA 换片唯一不会自动刷新的部分，推迟到用户点开「评论」标签再换，
+    // 换片瞬间就不用等评论组件重建。
+    const identifier = getVideoCommentIdentifier()
+    setBewlyWidescreenPendingCommentRefresh(() => {
+      if (typeof aid === 'number' && Number.isSafeInteger(aid) && aid > 0) {
+        applyCommentsAid(aid, targetNavigationKey, requestId)
+        return
+      }
+
+      if (identifier)
+        void reloadCommentsForWidescreenNavigation(targetNavigationKey, requestId, identifier)
+    })
+
+    handleVideoPageNavigation()
+  }
+
+  /** B 站路由生成的地址结尾斜杠不固定，比较换片目标前先抹平。 */
+  function normalizeNavigationKey(key: string) {
+    return key.replace(/\/+(?=\?|$)/, '')
+  }
+
+  /** B 站路由可能带异步守卫，地址不一定在换片调用返回时就已更新。 */
+  function waitForNavigationKey(targetNavigationKey: string, timeout = 1200) {
+    return new Promise<boolean>((resolve) => {
+      const deadline = Date.now() + timeout
+      const check = () => {
+        if (normalizeNavigationKey(getVideoNavigationKey(location.href)) === targetNavigationKey) {
+          resolve(true)
+          return
+        }
+
+        if (Date.now() >= deadline) {
+          resolve(false)
+          return
+        }
+
+        setTimeout(check, 50)
+      }
+
+      check()
+    })
+  }
+
+  registerWidescreenSoftSwitchDriver(async (target) => {
+    if (!isBewlyWidescreenActive() || !isVideoPage())
+      return false
+
+    // 目标地址由 bvid 自行拼出，避免卡片链接上的多余参数或结尾斜杠影响比较。
+    const targetNavigationKey = normalizeNavigationKey(
+      getVideoNavigationKey(new URL(`/video/${target.bvid}/`, location.origin).href),
+    )
+    if (!targetNavigationKey
+      || targetNavigationKey === normalizeNavigationKey(getVideoNavigationKey(location.href))) {
+      return false
+    }
+
+    // 必须先登记，B 站路由是同步执行的，pushstate 钩子会立刻读到这个标记。
+    clearPendingSoftSwitchNavigation()
+    pendingSoftSwitchNavigationKey = targetNavigationKey
+    pendingSoftSwitchAid = target.aid
+    pendingSoftSwitchTimer = setTimeout(clearPendingSoftSwitchNavigation, 5000)
+
+    if (!beginBewlyWidescreenSoftSwitch({ coverUrl: target.coverUrl })) {
+      clearPendingSoftSwitchNavigation()
+      return false
+    }
+
+    const switched = await sendWidescreenSoftSwitchToPage(target)
+    if (switched && await waitForNavigationKey(targetNavigationKey))
+      return true
+
+    // 注入脚本没接上、或 B 站内部接口变动导致路由没生效，交回整页跳转。
+    clearPendingSoftSwitchNavigation()
+    cancelBewlyWidescreenSoftSwitch()
+    return false
+  })
+
   function prepareVideoNavigationBeforeRouteChange(event: Event) {
     const wasBewlyWidescreenActive = isBewlyWidescreenActive()
     if (!wasBewlyWidescreenActive)
@@ -912,6 +1019,10 @@ else if (shouldInitializeContentScript) {
     const currentNavigationKey = getVideoNavigationKey(location.href)
     const nextNavigationKey = getVideoNavigationKey(targetUrl)
     if (!nextNavigationKey || nextNavigationKey === currentNavigationKey)
+      return
+
+    // 页面内换片由我们自己发起，宽屏外壳必须原样保留，不能走退出重建。
+    if (normalizeNavigationKey(nextNavigationKey) === pendingSoftSwitchNavigationKey)
       return
 
     clearPendingWidescreenReloadNavigation()
@@ -956,6 +1067,18 @@ else if (shouldInitializeContentScript) {
         if (!isMeaningfulVideoNavigation) {
           clearPendingWidescreenReloadNavigation()
           autoContinuationNavigationKey = undefined
+          return
+        }
+
+        // 宽屏「首页」发起的页面内换片：外壳、首页列表与滚动位置全部保留，
+        // 只做换片后的记账，不销毁重建。
+        if (normalizeNavigationKey(currentVideoNavigationKey) === pendingSoftSwitchNavigationKey) {
+          const softSwitchAid = pendingSoftSwitchAid
+          clearPendingSoftSwitchNavigation()
+          clearPendingWidescreenReloadNavigation()
+          autoContinuationNavigationKey = undefined
+          lastVideoEndedAt = 0
+          finishWidescreenSoftSwitch(currentVideoNavigationKey, navigationRequestId, softSwitchAid)
           return
         }
 
